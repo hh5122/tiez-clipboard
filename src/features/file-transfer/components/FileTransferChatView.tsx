@@ -25,12 +25,6 @@ import type {
     FileTransferDevice
 } from "../types";
 
-const FILE_TRANSFER_DEBUG = import.meta.env.DEV;
-const fileTransferLog = (...args: unknown[]) => {
-    if (!FILE_TRANSFER_DEBUG) return;
-    console.log(...args);
-};
-
 // File Transfer Chat View Component
 const FileTransferChatView = ({
     t,
@@ -50,6 +44,8 @@ const FileTransferChatView = ({
     const [contextMenu, setContextMenu] = useState<FileTransferContextMenu | null>(null);
     const [onlineDevices, setOnlineDevices] = useState<FileTransferDevice[]>([]);
     const [isDragging, setIsDragging] = useState(false);
+    const lastDropSignatureRef = useRef("");
+    const lastDropHandledAtRef = useRef(0);
 
     const URL_REGEX = /((https?:\/\/|www\.)[^\s<]+|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,})(?:\/[^\s<]*)?)/gi;
 
@@ -192,9 +188,9 @@ const FileTransferChatView = ({
     };
 
     useEffect(() => {
-        fileTransferLog("FileTransferChatView Mounted - initializing listeners (Dual Mode)");
+        console.log("FileTransferChatView Mounted - initializing listeners (Dual Mode)");
         const appWindow = getCurrentWindow();
-        fileTransferLog("[DEBUG] appWindow label:", appWindow.label);
+        console.log("[DEBUG] appWindow label:", appWindow.label);
         fetchMessages();
         invoke<string>("get_app_logo").then(setAppLogo).catch(console.error);
 
@@ -215,16 +211,30 @@ const FileTransferChatView = ({
 
         // Define handlers to be reused
         const handleDragDrop = (event: { payload: unknown }) => {
-            fileTransferLog("[DRAG] Drop event received:", event);
-            fileTransferLog("[DRAG] Event payload type:", typeof event.payload);
-            fileTransferLog("[DRAG] Event payload:", JSON.stringify(event.payload, null, 2));
+            console.log("[DRAG] Drop event received:", event);
+            console.log("[DRAG] Event payload type:", typeof event.payload);
+            console.log("[DRAG] Event payload:", JSON.stringify(event.payload, null, 2));
             setIsDragging(false);
 
             const paths = resolveDropPaths(event.payload);
+            const signature = paths.slice().sort().join("|");
+            const now = Date.now();
 
-            fileTransferLog("[DRAG] Parsed paths:", paths);
+            console.log("[DRAG] Parsed paths:", paths);
+
+            if (
+                signature &&
+                signature === lastDropSignatureRef.current &&
+                now - lastDropHandledAtRef.current < 1500
+            ) {
+                console.log("[DRAG] Duplicate drop event ignored");
+                return;
+            }
 
             if (paths && paths.length > 0) {
+                lastDropSignatureRef.current = signature;
+                lastDropHandledAtRef.current = now;
+
                 const tempMessages: FileTransferMessage[] = [];
                 paths.forEach(path => {
                     const fileName = path.split(/[/\\]/).pop() || 'File';
@@ -252,47 +262,47 @@ const FileTransferChatView = ({
         };
 
         const handleDragEnter = (event: { payload: unknown }) => {
-            fileTransferLog("[DRAG] Enter event received:", event);
+            console.log("[DRAG] Enter event received:", event);
             setIsDragging(true);
         };
 
         const handleDragLeave = (event: { payload: unknown }) => {
-            fileTransferLog("[DRAG] Leave event received:", event);
+            console.log("[DRAG] Leave event received:", event);
             setIsDragging(false);
         };
 
         // Listen to BOTH v1 and v2 events just to be safe
-        fileTransferLog("[DEBUG] Registering drag-drop event listeners...");
+        console.log("[DEBUG] Registering drag-drop event listeners...");
 
         // v1 event names (some versions still use these)
         const unlistenV1Drop = appWindow.listen("tauri://file-drop", (e) => {
-            fileTransferLog("[v1] file-drop received");
+            console.log("[v1] file-drop received");
             handleDragDrop(e);
         });
         const unlistenV1Hover = appWindow.listen("tauri://file-drop-hover", (e) => {
-            fileTransferLog("[v1] file-drop-hover received");
+            console.log("[v1] file-drop-hover received");
             handleDragEnter(e);
         });
         const unlistenV1Cancel = appWindow.listen("tauri://file-drop-cancelled", (e) => {
-            fileTransferLog("[v1] file-drop-cancelled received");
+            console.log("[v1] file-drop-cancelled received");
             handleDragLeave(e);
         });
 
         // v2 event names
         const unlistenV2Drop = appWindow.listen("tauri://drag-drop", (e) => {
-            fileTransferLog("[v2] drag-drop received");
+            console.log("[v2] drag-drop received");
             handleDragDrop(e);
         });
         const unlistenV2Enter = appWindow.listen("tauri://drag-enter", (e) => {
-            fileTransferLog("[v2] drag-enter received");
+            console.log("[v2] drag-enter received");
             handleDragEnter(e);
         });
         const unlistenV2Leave = appWindow.listen("tauri://drag-leave", (e) => {
-            fileTransferLog("[v2] drag-leave received");
+            console.log("[v2] drag-leave received");
             handleDragLeave(e);
         });
 
-        fileTransferLog("[DEBUG] All drag-drop listeners registered successfully");
+        console.log("[DEBUG] All drag-drop listeners registered successfully");
 
         const unlistenDevices = listen<FileTransferDevice[]>("online-devices-updated", (event) => {
             setOnlineDevices(event.payload || []);
