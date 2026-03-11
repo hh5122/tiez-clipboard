@@ -103,29 +103,37 @@ export const useSettingsApply = ({
       show_app_border: showAppBorder
     }).catch(console.error);
 
-    let unlisten: (() => void) | null = null;
+    let unlistenThemeChanged: (() => void) | null = null;
     let cleanupMedia: (() => void) | null = null;
 
-    if (colorMode === "system") {
-      getCurrentWindow()
-        .onThemeChanged((event) => {
-          if (disposed) return;
+    getCurrentWindow()
+      .onThemeChanged((event) => {
+        if (disposed) return;
+
+        if (colorMode === "system") {
           const next = event?.payload === "dark" ? "dark" : "light";
           applyExplicitMode(next);
-          invoke("set_theme", {
-            theme,
-            color_mode: "system",
-            show_app_border: showAppBorder
-          }).catch(console.error);
-        })
-        .then((f) => {
-          if (disposed) {
-            f();
-            return;
-          }
-          unlisten = f;
-        });
+        } else {
+          applyExplicitMode(colorMode === "dark" ? "dark" : "light");
+        }
 
+        // Native mica/acrylic may be refreshed by the OS when system theme changes.
+        // Re-apply the user's selected mode so the window background stays locked.
+        invoke("set_theme", {
+          theme,
+          color_mode: colorMode,
+          show_app_border: showAppBorder
+        }).catch(console.error);
+      })
+      .then((f) => {
+        if (disposed) {
+          f();
+          return;
+        }
+        unlistenThemeChanged = f;
+      });
+
+    if (colorMode === "system") {
       if (window.matchMedia) {
         const media = window.matchMedia("(prefers-color-scheme: dark)");
         const onChange = () => applyExplicitMode(media.matches ? "dark" : "light");
@@ -141,7 +149,7 @@ export const useSettingsApply = ({
 
     return () => {
       disposed = true;
-      if (unlisten) unlisten();
+      if (unlistenThemeChanged) unlistenThemeChanged();
       if (cleanupMedia) cleanupMedia();
     };
   }, [theme, colorMode, showAppBorder, settingsLoaded, compactMode]);
