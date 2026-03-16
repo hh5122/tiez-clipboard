@@ -628,6 +628,9 @@ const ClipboardItem = ({
     tagColors,
     richTextSnapshotPreview = false,
     showSourceAppIcon = true,
+    sensitiveMaskPrefixVisible = 3,
+    sensitiveMaskSuffixVisible = 3,
+    sensitiveMaskEmailDomain = false,
     dragControls,
     id,
     compactMode,
@@ -665,8 +668,12 @@ const ClipboardItem = ({
     const richTextSnapshotRenderMaxHeight = compactMode ? 100 : 200;
     const canShowCompactPreview = compactMode && item.content_type !== "file";
     const sensitivePreview = useMemo(
-        () => formatSensitivePreview(item.content, item.content_type),
-        [item.content, item.content_type]
+        () => formatSensitivePreview(item.content, item.content_type, {
+            prefixVisible: sensitiveMaskPrefixVisible,
+            suffixVisible: sensitiveMaskSuffixVisible,
+            maskEmailDomain: sensitiveMaskEmailDomain,
+        }),
+        [item.content, item.content_type, sensitiveMaskPrefixVisible, sensitiveMaskSuffixVisible, sensitiveMaskEmailDomain]
     );
     const richTextSnapshotSrc = useMemo(() => {
         if (!richTextSnapshotPreview) return null;
