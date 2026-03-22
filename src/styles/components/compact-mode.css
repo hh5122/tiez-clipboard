@@ -629,16 +629,16 @@ html.theme-acrylic .history-item.compact .compact-pinned-indicator {
 
 /* AI dropdown scrollbar styling */
 .history-item.compact .item-actions [style*="overflow-y: auto"]::-webkit-scrollbar {
-    width: 4px;
+    width: var(--scrollbar-size-thin);
 }
 
 .history-item.compact .item-actions [style*="overflow-y: auto"]::-webkit-scrollbar-track {
-    background: transparent;
+    background: var(--scrollbar-track-background);
 }
 
 .history-item.compact .item-actions [style*="overflow-y: auto"]::-webkit-scrollbar-thumb {
-    background: var(--border-dark);
-    border-radius: 0;
+    background: var(--scrollbar-thumb-color);
+    border-radius: var(--scrollbar-radius);
 }
 
 body.theme-mica .history-item.compact,

@@ -353,7 +353,7 @@ fn generate_cf_html(html: &str) -> String {
         )
     };
 
-    let mut html_content = html.to_string();
+    let mut html_content = crate::services::clipboard::repair_html_fragment(html);
     let has_html_tag = html_tag_re.is_match(&html_content);
     let has_start = html_content.contains("<!--StartFragment-->");
     let has_end = html_content.contains("<!--EndFragment-->");

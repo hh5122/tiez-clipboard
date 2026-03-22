@@ -5,7 +5,7 @@ use crate::infrastructure::repository::clipboard_repo::ClipboardRepository;
 use crate::infrastructure::repository::tag_repo::TagRepository;
 use crate::domain::models::ClipboardEntry;
 use crate::error::{AppResult, AppError};
-use crate::services::clipboard::truncate_html_for_preview;
+use crate::services::clipboard::{build_entry_preview, truncate_html_for_preview};
 
 #[tauri::command]
 pub fn get_clipboard_history(
@@ -65,11 +65,7 @@ pub fn get_clipboard_history(
         }
 
         if item.content_type == "text" || item.content_type == "code" || item.content_type == "url" || item.content_type == "rich_text" {
-            if item.content.chars().count() > 500 {
-                item.preview = format!("{}...", item.content.chars().take(497).collect::<String>());
-            } else {
-                item.preview = item.content.clone();
-            }
+            item.preview = build_entry_preview(&item.content_type, &item.content, item.html_content.as_deref());
         }
     }
     
@@ -118,11 +114,7 @@ pub fn search_clipboard_history(
         }
 
         if item.content_type == "text" || item.content_type == "code" || item.content_type == "url" || item.content_type == "rich_text" {
-            if item.content.chars().count() > 500 {
-                item.preview = format!("{}...", item.content.chars().take(497).collect::<String>());
-            } else {
-                item.preview = item.content.clone();
-            }
+            item.preview = build_entry_preview(&item.content_type, &item.content, item.html_content.as_deref());
         }
     }
 
@@ -171,6 +163,10 @@ pub fn get_tag_items(state: State<'_, DbState>, tag: String) -> AppResult<Vec<Cl
            && item.content.chars().count() > 50000 
         {
             item.content = format!("{}... [Content Truncated]", item.content.chars().take(50000).collect::<String>());
+        }
+
+        if item.content_type == "text" || item.content_type == "code" || item.content_type == "url" || item.content_type == "rich_text" {
+            item.preview = build_entry_preview(&item.content_type, &item.content, item.html_content.as_deref());
         }
     }
     

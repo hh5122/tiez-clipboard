@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toTauriLocalImageSrc } from "../lib/localImageSrc";
+import { isHtmlishTagText, repairHtmlFragment } from "../lib/repairHtmlFragment";
 
 const pickFirstSrcFromSrcset = (srcset?: string | null): string | null => {
   if (!srcset) return null;
@@ -43,8 +44,32 @@ const resolveImgSource = (el: Element): string | null => {
 const sanitizeHTML = (html: string, preview?: boolean) => {
   const parser = new DOMParser();
 
+  const stripLeadingHtmlishTextNode = (container: HTMLElement) => {
+    if (!container.querySelector("table")) return;
+
+    for (const node of Array.from(container.childNodes)) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent?.trim() || "";
+        if (!text) {
+          container.removeChild(node);
+          continue;
+        }
+        if (isHtmlishTagText(text)) {
+          container.removeChild(node);
+          continue;
+        }
+      }
+
+      if (node.nodeType === Node.ELEMENT_NODE && (node as Element).tagName.toLowerCase() === "style") {
+        continue;
+      }
+
+      break;
+    }
+  };
+
   // Heuristic: If it contains table elements but no <table> tag, wrap it.
-  let processedHtml = html.trim();
+  let processedHtml = repairHtmlFragment(html);
   if ((processedHtml.includes("<tr") || processedHtml.includes("<td") || processedHtml.includes("<col"))
     && !processedHtml.toLowerCase().includes("<table")) {
     processedHtml = `<table style="border-collapse: collapse; min-width: 100%;">${processedHtml}</table>`;
@@ -82,6 +107,7 @@ const sanitizeHTML = (html: string, preview?: boolean) => {
   doc.head.querySelectorAll("style").forEach(style => {
     doc.body.prepend(style);
   });
+  stripLeadingHtmlishTextNode(doc.body);
 
   const all = doc.querySelectorAll("*");
   all.forEach(el => {

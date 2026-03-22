@@ -2,6 +2,12 @@ import type { ComponentType, ReactNode, CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { ChevronDown, ChevronRight, X } from "lucide-react";
+import {
+    THEMES,
+    getThemeLabel,
+    supportsCustomBackground,
+    supportsSurfaceOpacity
+} from "../../../../shared/config/themes";
 import type { Locale } from "../../../../shared/types";
 
 interface LabelWithHintProps {
@@ -78,7 +84,11 @@ const AppearanceSettingsGroup = ({
     surfaceOpacity,
     setSurfaceOpacity,
     saveAppSetting
-}: AppearanceSettingsGroupProps) => (
+}: AppearanceSettingsGroupProps) => {
+    const showCustomBackgroundControls = supportsCustomBackground(theme);
+    const showSurfaceOpacityControls = supportsSurfaceOpacity(theme);
+
+    return (
     <div className={`settings-group ${collapsed ? 'collapsed' : ''}`}>
         <div className="group-header" onClick={onToggle}>
             <h3 style={{ margin: 0 }}>{t('appearance_settings')}</h3>
@@ -91,11 +101,7 @@ const AppearanceSettingsGroup = ({
                         <span className="item-label">{t('visual_theme')}</span>
                     </div>
                     <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
-                        {[
-                            { id: 'retro', name: t('theme_retro') },
-                            { id: 'mica', name: t('theme_mica') },
-                            { id: 'acrylic', name: t('theme_acrylic') }
-                        ].map(themeItem => (
+                        {THEMES.map(themeItem => (
                             <button
                                 key={themeItem.id}
                                 onClick={() => {
@@ -105,7 +111,7 @@ const AppearanceSettingsGroup = ({
                                 className={`btn-icon ${theme === themeItem.id ? 'active' : ''}`}
                                 style={{ flex: 1, height: '36px', fontSize: '12px', fontWeight: 'bold' }}
                             >
-                                {themeItem.name}
+                                {getThemeLabel(themeItem.id, language)}
                             </button>
                         ))}
                     </div>
@@ -255,8 +261,9 @@ const AppearanceSettingsGroup = ({
                     />
                 </div>
 
-                {(theme === 'mica' || theme === 'acrylic') && (
+                {(showCustomBackgroundControls || showSurfaceOpacityControls) && (
                     <>
+                        {showCustomBackgroundControls && (
                         <div className="setting-item column no-border">
                             <div className="item-label-group" style={{ marginBottom: '8px' }}>
                                 <span className="item-label">{t('custom_background') || '自定义背景'}</span>
@@ -335,7 +342,9 @@ const AppearanceSettingsGroup = ({
                                 </div>
                             )}
                         </div>
+                        )}
 
+                        {showSurfaceOpacityControls && (
                         <div className="setting-item column">
                             <div className="item-label-group" style={{ marginBottom: '4px', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <span className="item-label">{t('surface_opacity') || '界面底板透明度'}</span>
@@ -354,11 +363,13 @@ const AppearanceSettingsGroup = ({
                                 style={buildRangeStyle(surfaceOpacity, 0, 100)}
                             />
                         </div>
+                        )}
                     </>
                 )}
             </div>
         )}
     </div>
-);
+    );
+};
 
 export default AppearanceSettingsGroup;

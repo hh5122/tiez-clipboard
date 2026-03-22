@@ -118,14 +118,7 @@ impl PipelineStage for DiscoveryStage {
             }
         };
 
-        let preview = if content_type == "image" {
-            "[Image Content]".to_string()
-        } else if content.chars().count() > 500 {
-            let preview_text: String = content.chars().take(497).collect();
-            format!("{}...", preview_text.replace('\n', " "))
-        } else {
-            content.replace('\n', " ")
-        };
+        let preview = build_entry_preview(&content_type, &content, html_content.as_deref());
 
         let is_external = (content_type == "file" || content_type == "video" || content_type == "image")
             && !content.starts_with("data:");

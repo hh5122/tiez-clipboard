@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { DEFAULT_THEME } from "../../../shared/config/themes";
 import type { ClipboardEntry, Locale } from "../../../shared/types";
 import type { AppState, DefaultAppsMap, InstalledAppOption } from "../types";
 import type { AiProfile } from "../../settings/types";
@@ -65,7 +66,7 @@ export const useAppState = (): AppState => {
   const [captureRichText, setCaptureRichText] = useState(false);
   const [richTextSnapshotPreview, setRichTextSnapshotPreview] = useState(false);
   const [silentStart, setSilentStart] = useState(true);
-  const [theme, setTheme] = useState("mica");
+  const [theme, setTheme] = useState(DEFAULT_THEME);
   const [colorMode, setColorMode] = useState("system");
   const [showAppBorder, setShowAppBorder] = useState(true);
   const [compactMode, setCompactMode] = useState(false);

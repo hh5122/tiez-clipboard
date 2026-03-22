@@ -1,4 +1,5 @@
 import { toTauriLocalImageSrc } from "./localImageSrc";
+import { isHtmlishTagText, repairHtmlFragment } from "./repairHtmlFragment";
 
 const SNAPSHOT_CACHE_LIMIT = 240;
 const SNAPSHOT_CACHE_VERSION = "v4";
@@ -68,7 +69,7 @@ const normalizeRichHtml = (html: string): {
   };
 } | null => {
   const parser = new DOMParser();
-  let processed = stripRichImageFallbackMarker((html || "").trim());
+  let processed = repairHtmlFragment(stripRichImageFallbackMarker((html || "").trim()));
   if (!processed) return null;
 
   if (
@@ -83,6 +84,28 @@ const normalizeRichHtml = (html: string): {
   doc.head.querySelectorAll("style").forEach((style) => {
     doc.body.prepend(style);
   });
+
+  if (doc.body.querySelector("table")) {
+    for (const node of Array.from(doc.body.childNodes)) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent?.trim() || "";
+        if (!text) {
+          doc.body.removeChild(node);
+          continue;
+        }
+        if (isHtmlishTagText(text)) {
+          doc.body.removeChild(node);
+          continue;
+        }
+      }
+
+      if (node.nodeType === Node.ELEMENT_NODE && (node as Element).tagName.toLowerCase() === "style") {
+        continue;
+      }
+
+      break;
+    }
+  }
 
   const imageStats = {
     total: 0,

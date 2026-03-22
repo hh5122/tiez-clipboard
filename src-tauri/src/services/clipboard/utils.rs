@@ -12,6 +12,9 @@ use urlencoding::decode;
 const HTML_PREVIEW_MAX_CHARS: usize = 5000;
 const HTML_PREVIEW_MAX_ROWS: usize = 10;
 const HTML_TRUNCATION_SUFFIX: &str = "... [HTML Truncated]";
+const TEXT_PREVIEW_MAX_CHARS: usize = 500;
+const TEXT_PREVIEW_TRUNCATED_CHARS: usize = TEXT_PREVIEW_MAX_CHARS - 3;
+const RICH_TEXT_PREVIEW_FALLBACK: &str = "[Rich Text Content]";
 pub const RICH_IMAGE_FALLBACK_PREFIX: &str = "<!--TIEZ_RICH_IMAGE:";
 pub const RICH_IMAGE_FALLBACK_SUFFIX: &str = "-->";
 const REMOTE_IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -173,6 +176,135 @@ fn truncate_chars_with_suffix(text: &str, max_chars: usize, suffix: &str) -> Str
     out
 }
 
+fn collapse_preview_whitespace(text: &str) -> String {
+    static WHITESPACE_RE: OnceLock<Regex> = OnceLock::new();
+
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n").replace('\n', " ");
+    WHITESPACE_RE
+        .get_or_init(|| Regex::new(r"\s+").unwrap())
+        .replace_all(&normalized, " ")
+        .trim()
+        .to_string()
+}
+
+fn decode_basic_html_entities(text: &str) -> String {
+    text.replace("&nbsp;", " ")
+        .replace("&#160;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#34;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+}
+
+pub fn repair_html_fragment(html: &str) -> String {
+    static MISSING_LEADING_TAG_RE: OnceLock<Regex> = OnceLock::new();
+
+    let trimmed = html.trim();
+    if trimmed.is_empty() || trimmed.starts_with('<') {
+        return trimmed.to_string();
+    }
+
+    let tag_like = MISSING_LEADING_TAG_RE
+        .get_or_init(|| {
+            Regex::new(
+                r"(?is)^(table|tbody|thead|tfoot|tr|td|th|colgroup|col|div|span|p|ul|ol|li|blockquote|pre|h[1-6]|meta|style|img|a)\b[^>]*>"
+            )
+            .unwrap()
+        })
+        .is_match(trimmed);
+
+    if tag_like {
+        format!("<{}", trimmed)
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn looks_like_html_fragment(text: &str) -> bool {
+    let repaired = repair_html_fragment(text);
+    let trimmed = repaired.trim_start_matches('\u{feff}').trim_start();
+    if trimmed.starts_with('<') {
+        return true;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    [
+        "table ",
+        "tbody",
+        "thead",
+        "tfoot",
+        "tr ",
+        "td ",
+        "th ",
+        "col ",
+        "colgroup",
+        "div ",
+        "span ",
+        "p ",
+        "meta ",
+        "style ",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+        || (lower.contains("cellpadding=") && lower.contains("cellspacing="))
+}
+
+fn extract_preview_text_from_htmlish(text: &str) -> String {
+    static BREAK_TAG_RE: OnceLock<Regex> = OnceLock::new();
+    static TAG_RE: OnceLock<Regex> = OnceLock::new();
+
+    let repaired = repair_html_fragment(text);
+    let with_breaks = BREAK_TAG_RE
+        .get_or_init(|| {
+            Regex::new(r"(?is)</?(?:br|p|div|li|tr|td|th|table|h[1-6]|section|article|ul|ol)\b[^>]*>")
+                .unwrap()
+        })
+        .replace_all(&repaired, " ");
+    let without_tags = TAG_RE
+        .get_or_init(|| Regex::new(r"(?is)<[^>]+>").unwrap())
+        .replace_all(with_breaks.as_ref(), " ");
+    collapse_preview_whitespace(&decode_basic_html_entities(without_tags.as_ref()))
+}
+
+pub fn build_entry_preview(content_type: &str, content: &str, html_content: Option<&str>) -> String {
+    if content_type == "image" {
+        return "[Image Content]".to_string();
+    }
+
+    let preview_text = if content_type == "rich_text" {
+        let html_preview = html_content
+            .map(extract_preview_text_from_htmlish)
+            .filter(|text| !text.is_empty());
+
+        match html_preview {
+            Some(text) => text,
+            None => {
+                let content_preview = extract_preview_text_from_htmlish(content);
+                let normalized_content = collapse_preview_whitespace(content);
+                if content_preview.is_empty()
+                    || (looks_like_html_fragment(content) && content_preview == normalized_content)
+                {
+                    RICH_TEXT_PREVIEW_FALLBACK.to_string()
+                } else {
+                    content_preview
+                }
+            }
+        }
+    } else {
+        collapse_preview_whitespace(content)
+    };
+
+    if preview_text.chars().count() > TEXT_PREVIEW_MAX_CHARS {
+        let preview_text: String = preview_text.chars().take(TEXT_PREVIEW_TRUNCATED_CHARS).collect();
+        format!("{}...", preview_text)
+    } else {
+        preview_text
+    }
+}
+
 pub fn attach_rich_image_fallback(html: &str, payload: &str) -> String {
     let mut out = String::with_capacity(
         html.len() + RICH_IMAGE_FALLBACK_PREFIX.len() + RICH_IMAGE_FALLBACK_SUFFIX.len() + payload.len() + 1,
@@ -242,15 +374,16 @@ pub fn truncate_entry_for_ui(mut entry: ClipboardEntry) -> ClipboardEntry {
 }
 
 pub fn truncate_html_for_preview(html: &str) -> Option<String> {
-    if html.trim().is_empty() {
+    let repaired = repair_html_fragment(html);
+    if repaired.trim().is_empty() {
         return None;
     }
 
-    if html.chars().count() <= HTML_PREVIEW_MAX_CHARS {
-        return Some(html.to_string());
+    if repaired.chars().count() <= HTML_PREVIEW_MAX_CHARS {
+        return Some(repaired);
     }
 
-    let trimmed = html.trim();
+    let trimmed = repaired.trim();
     let lower = trimmed.to_ascii_lowercase();
     let table_pos = lower.find("<table");
     let tr_pos = lower.find("<tr");
@@ -284,11 +417,10 @@ pub fn truncate_html_for_preview(html: &str) -> Option<String> {
         }
 
         if end_rel == 0 {
-            end_rel = slice
-                .char_indices()
-                .nth(HTML_PREVIEW_MAX_CHARS)
-                .map(|(i, _)| i)
-                .unwrap_or(slice.len());
+            // Office/WPS table fragments may omit explicit </tr> tags. Returning the
+            // intact table fragment is safer than chopping through markup and showing
+            // raw HTML text in the list preview.
+            return Some(slice.to_string());
         }
 
         let mut out = slice[..end_rel].to_string();
@@ -303,18 +435,58 @@ pub fn truncate_html_for_preview(html: &str) -> Option<String> {
             }
         }
 
-        if out.chars().count() > HTML_PREVIEW_MAX_CHARS {
-            out = truncate_chars_with_suffix(&out, HTML_PREVIEW_MAX_CHARS, HTML_TRUNCATION_SUFFIX);
-        }
-
         return Some(out);
     }
 
-    Some(truncate_chars_with_suffix(
-        trimmed,
-        HTML_PREVIEW_MAX_CHARS,
-        HTML_TRUNCATION_SUFFIX,
-    ))
+    Some(truncate_chars_with_suffix(trimmed, HTML_PREVIEW_MAX_CHARS, HTML_TRUNCATION_SUFFIX))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_entry_preview, parse_cf_html, truncate_html_for_preview};
+
+    #[test]
+    fn rich_text_preview_prefers_readable_html_text() {
+        let html = "<table><tr><td>Alpha</td><td>Beta</td></tr><tr><td>Gamma</td><td>Delta</td></tr></table>";
+        let preview = build_entry_preview("rich_text", "table border=0 cellpadding=0", Some(html));
+
+        assert_eq!(preview, "Alpha Beta Gamma Delta");
+    }
+
+    #[test]
+    fn rich_text_preview_hides_markup_only_plain_text() {
+        let preview = build_entry_preview(
+            "rich_text",
+            "table border=0 cellpadding=0 cellspacing=0 width=288",
+            None,
+        );
+
+        assert_eq!(preview, "[Rich Text Content]");
+    }
+
+    #[test]
+    fn table_html_preview_keeps_valid_table_markup() {
+        let row = "<tr><td>WPS</td><td>Preview</td><td>Cell</td></tr>";
+        let html = format!(
+            "<table border=0 cellpadding=0 cellspacing=0 style='border-collapse:collapse'>{}</table>",
+            row.repeat(120)
+        );
+
+        let truncated = truncate_html_for_preview(&html).expect("table preview should exist");
+
+        assert!(truncated.starts_with("<table"));
+        assert!(truncated.contains("WPS"));
+        assert!(truncated.ends_with("</table>"));
+    }
+
+    #[test]
+    fn parse_cf_html_repairs_missing_opening_bracket() {
+        let raw = b"Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n<!--StartFragment-->table border=0 cellpadding=0 cellspacing=0><tr><td>A</td></tr><!--EndFragment-->";
+        let parsed = parse_cf_html(raw).expect("cf_html should parse");
+
+        assert!(parsed.starts_with("<table"));
+        assert!(parsed.contains("<td>A</td>"));
+    }
 }
 
 pub fn detect_content_type(text: &str) -> String {
@@ -558,7 +730,7 @@ pub fn parse_cf_html(raw: &[u8]) -> Option<String> {
             {
                 format!("<table style=\"border-collapse: collapse; min-width: 100%;\">{}</table>", fragment)
             } else {
-                fragment.clone()
+                repair_html_fragment(&fragment)
             };
 
             if let (Some(html_s), Some(html_e)) = (start_html, end_html) {
@@ -592,9 +764,11 @@ pub fn parse_cf_html(raw: &[u8]) -> Option<String> {
     if let Some(start_idx) = raw_text.find("<!--StartFragment-->") {
         if let Some(end_idx) = raw_text.find("<!--EndFragment-->") {
             let fragment = &raw_text[start_idx + "<!--StartFragment-->".len()..end_idx];
-            return Some(fragment.to_string());
+            return Some(repair_html_fragment(fragment));
         }
     }
-    if raw_text.trim().starts_with("<") { return Some(raw_text); }
+    if looks_like_html_fragment(&raw_text) {
+        return Some(repair_html_fragment(&raw_text));
+    }
     None
 }

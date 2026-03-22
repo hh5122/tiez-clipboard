@@ -506,27 +506,27 @@
   background-size: 24px 24px;
   opacity: 1;
   scrollbar-width: thin;
-  scrollbar-color: var(--text-primary) transparent;
+  scrollbar-color: var(--scrollbar-thumb-color) var(--scrollbar-track-background);
 }
 
 /* Custom Scrollbar for Chat Box */
 .wt-chat-box::-webkit-scrollbar{
-  width: 10px;
+  width: var(--scrollbar-size);
 }
 
 .wt-chat-box::-webkit-scrollbar-track{
-  background: transparent;
-  border-left: 2px solid var(--border-dark);
+  background: var(--scrollbar-track-background);
+  border-left: var(--scrollbar-track-border-start);
 }
 
 .wt-chat-box::-webkit-scrollbar-thumb{
-  background: var(--text-primary);
-  border: 2px solid var(--bg-body);
-  border-radius: 0;
+  background: var(--scrollbar-thumb-color);
+  border: var(--scrollbar-chat-thumb-border);
+  border-radius: var(--scrollbar-radius);
 }
 
 .wt-chat-box::-webkit-scrollbar-thumb:hover{
-  background: var(--accent-color);
+  background: var(--scrollbar-thumb-hover-color);
 }
 
 .wt-message{

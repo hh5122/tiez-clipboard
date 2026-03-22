@@ -931,8 +931,8 @@ export default function TagManager({ t, theme }: TagManagerProps) {
                 .theme-mica .themed-card, .theme-acrylic .themed-card { border-radius: 12px; border: 1px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.45); box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
                 .dark-mode .theme-mica .themed-card, .dark-mode .theme-acrylic .themed-card { background: rgba(45,45,45,0.6); border-color: rgba(255,255,255,0.1); }
                 
-                .custom-scrollbar::-webkit-scrollbar { width: 3px; }
-                .custom-scrollbar::-webkit-scrollbar-thumb { background: var(--border-dark); border-radius: 10px; }
+                .custom-scrollbar::-webkit-scrollbar { width: var(--scrollbar-size-thin); }
+                .custom-scrollbar::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb-color); border-radius: var(--scrollbar-radius); }
             `}</style>
         </div >
     );

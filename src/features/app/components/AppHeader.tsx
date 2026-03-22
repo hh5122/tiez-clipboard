@@ -13,6 +13,7 @@ import {
   X
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getTagColor } from "../../../shared/lib/utils";
 
 interface AppHeaderProps {
@@ -95,8 +96,11 @@ const AppHeader = ({
 
   return (
   <header
-    data-tauri-drag-region
     onMouseDown={(e) => {
+      if (e.button !== 0) {
+        return;
+      }
+
       // Don't drag if clicking on interactive elements
       const target = e.target as HTMLElement;
       if (target.closest('button, input, select, textarea, [role="button"]')) {
@@ -107,6 +111,8 @@ const AppHeader = ({
       if (searchInputRef.current && document.activeElement === searchInputRef.current) {
         searchInputRef.current.blur();
       }
+      e.preventDefault();
+      getCurrentWindow().startDragging().catch(console.error);
     }}
   >
     <div className="header-top">
