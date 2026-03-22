@@ -158,6 +158,30 @@
   border-bottom: none !important;
 }
 
+.settings-subsection-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.settings-subsection-title,
+.setting-item .settings-subsection-trigger .item-label {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+.settings-subsection-label {
+  min-width: 0;
+}
+
+.settings-subsection-label .item-label-group {
+  flex: 0 1 auto;
+  padding-right: 0;
+}
+
 .item-label-group {
   flex: 1;
   display: flex;
