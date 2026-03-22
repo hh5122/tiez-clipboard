@@ -20,7 +20,8 @@ pub fn render_index(theme: &str, logo_base64: &str) -> String {
             --radius: 0px;
             --bubble-received-bg: #ffffff;
             --app-height: 100vh;
-            --vv-bottom: 0px;
+            --footer-shift: 0px;
+            --composer-height: 76px;
         }}
 
         @media (prefers-color-scheme: dark) {{
@@ -71,6 +72,10 @@ pub fn render_index(theme: &str, logo_base64: &str) -> String {
             height: 100dvh;
             height: var(--app-height);
             overflow: hidden;
+            position: fixed;
+            inset: 0;
+            width: 100%;
+            overscroll-behavior: none;
             transition: background 0.3s;
         }}
 
@@ -100,10 +105,18 @@ pub fn render_index(theme: &str, logo_base64: &str) -> String {
         .status-dot {{ width: 8px; height: 8px; background: #4caf50; border-radius: 50%; box-shadow: 0 0 5px #4caf50; }}
 
         #chat-box {{
-            flex: 1; overflow-y: auto; padding: 16px;
+            flex: 1; min-height: 0; overflow-y: auto; padding: 16px;
             display: flex; flex-direction: column; gap: 16px;
             scroll-behavior: smooth;
-            padding-bottom: calc(100px + max(env(safe-area-inset-bottom), var(--vv-bottom)));
+            -webkit-overflow-scrolling: touch;
+            overscroll-behavior: contain;
+            scrollbar-width: none;
+            padding-bottom: calc(var(--composer-height) + var(--footer-shift) + env(safe-area-inset-bottom) + 16px);
+            scroll-padding-bottom: calc(var(--composer-height) + var(--footer-shift) + env(safe-area-inset-bottom) + 12px);
+        }}
+
+        #chat-box::-webkit-scrollbar {{
+            display: none;
         }}
 
         .timestamp {{
@@ -230,12 +243,15 @@ pub fn render_index(theme: &str, logo_base64: &str) -> String {
 
         footer {{
             padding: 10px 16px;
-            padding-bottom: calc(10px + max(env(safe-area-inset-bottom), var(--vv-bottom)));
+            padding-bottom: calc(10px + env(safe-area-inset-bottom));
             background: var(--bg-panel);
             border-top: 2px solid var(--border-dark);
             display: flex; gap: 12px; align-items: flex-end;
             flex-shrink: 0;
             z-index: 10;
+            transform: translateY(calc(-1 * var(--footer-shift)));
+            transition: transform 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+            will-change: transform;
         }}
         .theme-mica footer, .theme-acrylic footer {{
             background: rgba(255,255,255,0.7); backdrop-filter: blur(20px);
@@ -407,6 +423,8 @@ pub fn render_index(theme: &str, logo_base64: &str) -> String {
         const textInput = document.getElementById('text-input');
         const sendBtn = document.getElementById('send-btn');
         const chatBox = document.getElementById('chat-box');
+        const footer = document.querySelector('footer');
+        const fsTextarea = document.getElementById('fs-textarea');
         
         const now = new Date();
         document.getElementById('time-now').innerText = `${{now.getHours().toString().padStart(2,'0')}}:${{now.getMinutes().toString().padStart(2,'0')}}`;
@@ -424,18 +442,31 @@ pub fn render_index(theme: &str, logo_base64: &str) -> String {
             chatBox.scrollTop = chatBox.scrollHeight;
         }}
 
+        function syncComposerMetrics() {{
+            if (!footer) return;
+            const composerHeight = Math.ceil(footer.getBoundingClientRect().height);
+            document.documentElement.style.setProperty('--composer-height', `${{composerHeight}}px`);
+        }}
+
         function syncViewportMetrics() {{
             const root = document.documentElement;
             const vv = window.visualViewport;
+            const activeElement = document.activeElement;
+            const mainInputFocused = activeElement === textInput;
             if (!vv) {{
                 root.style.setProperty('--app-height', `${{window.innerHeight}}px`);
-                root.style.setProperty('--vv-bottom', '0px');
+                root.style.setProperty('--footer-shift', '0px');
+                syncComposerMetrics();
                 return;
             }}
 
-            root.style.setProperty('--app-height', `${{Math.round(vv.height)}}px`);
-            const bottomInset = Math.max(0, window.innerHeight - (vv.height + vv.offsetTop));
-            root.style.setProperty('--vv-bottom', `${{Math.round(bottomInset)}}px`);
+            const layoutHeight = Math.max(window.innerHeight, vv.height + vv.offsetTop);
+            const overlap = Math.max(0, layoutHeight - (vv.height + vv.offsetTop));
+            const footerShift = mainInputFocused && overlap > 80 ? overlap : 0;
+
+            root.style.setProperty('--app-height', `${{Math.round(layoutHeight)}}px`);
+            root.style.setProperty('--footer-shift', `${{Math.round(footerShift)}}px`);
+            syncComposerMetrics();
         }}
 
         function normalizeFileName(name) {{
@@ -556,17 +587,24 @@ pub fn render_index(theme: &str, logo_base64: &str) -> String {
         textInput.addEventListener('focus', () => {{
             setTimeout(() => {{
                 syncViewportMetrics();
+                textInput.scrollIntoView({{ block: 'nearest', inline: 'nearest' }});
                 scrollToBottom();
             }}, 80);
         }});
 
+        textInput.addEventListener('blur', () => {{
+            setTimeout(syncViewportMetrics, 120);
+        }});
+
         window.addEventListener('resize', syncViewportMetrics);
         window.addEventListener('orientationchange', syncViewportMetrics);
+        window.addEventListener('load', syncComposerMetrics);
         if (window.visualViewport) {{
             window.visualViewport.addEventListener('resize', syncViewportMetrics);
             window.visualViewport.addEventListener('scroll', syncViewportMetrics);
         }}
         syncViewportMetrics();
+        syncComposerMetrics();
 
         // WebSocket Setup
         let socket;

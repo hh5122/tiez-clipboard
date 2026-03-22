@@ -100,7 +100,7 @@ const AppearanceSettingsGroup = ({
                     <div className="item-label-group" style={{ marginBottom: '8px' }}>
                         <span className="item-label">{t('visual_theme')}</span>
                     </div>
-                    <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
+                    <div className="settings-choice-grid theme-choice-grid">
                         {THEMES.map(themeItem => (
                             <button
                                 key={themeItem.id}
@@ -108,10 +108,12 @@ const AppearanceSettingsGroup = ({
                                     setTheme(themeItem.id);
                                     saveAppSetting('theme', themeItem.id);
                                 }}
-                                className={`btn-icon ${theme === themeItem.id ? 'active' : ''}`}
-                                style={{ flex: 1, height: '36px', fontSize: '12px', fontWeight: 'bold' }}
+                                className={`btn-icon theme-choice-btn ${theme === themeItem.id ? 'active' : ''}`}
+                                type="button"
                             >
-                                {getThemeLabel(themeItem.id, language)}
+                                <span className="theme-choice-title">
+                                    {getThemeLabel(themeItem.id, language)}
+                                </span>
                             </button>
                         ))}
                     </div>

@@ -146,18 +146,24 @@ const FileTransferChatView = ({
 
     const getAvatarConfig = (m: FileTransferMessage) => {
         if (m.sender_id === 'pc' || m.direction === 'out') {
-            return { isImg: !!appLogo, content: appLogo || 'PC', color: 'var(--text-primary)', initial: 'PC' };
+            return {
+                isImg: !!appLogo,
+                content: appLogo || 'PC',
+                color: 'var(--wt-own-avatar-background)',
+                textColor: 'var(--wt-own-avatar-color)',
+                initial: 'PC'
+            };
         }
 
         const gradients = [
-            'linear-gradient(135deg, #FF5F6D 0%, #FFC371 100%)',
-            'linear-gradient(135deg, #2193b0 0%, #6dd5ed 100%)',
-            'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)',
-            'linear-gradient(135deg, #8E2DE2 0%, #4A00E0 100%)',
-            'linear-gradient(135deg, #f953c6 0%, #b91d73 100%)',
-            'linear-gradient(135deg, #ee0979 0%, #ff6a00 100%)',
-            'linear-gradient(135deg, #00c6ff 0%, #0072ff 100%)',
-            'linear-gradient(135deg, #f7971e 0%, #ffd200 100%)'
+            'var(--wt-peer-gradient-1)',
+            'var(--wt-peer-gradient-2)',
+            'var(--wt-peer-gradient-3)',
+            'var(--wt-peer-gradient-4)',
+            'var(--wt-peer-gradient-5)',
+            'var(--wt-peer-gradient-6)',
+            'var(--wt-peer-gradient-7)',
+            'var(--wt-peer-gradient-8)'
         ];
 
         const id = m.sender_id || 'mobile';
@@ -177,7 +183,12 @@ const FileTransferChatView = ({
             else initial = m.sender_name.charAt(0).toUpperCase();
         }
 
-        return { isImg: false, color: gradient, initial };
+        return {
+            isImg: false,
+            color: gradient,
+            textColor: 'var(--wt-peer-avatar-color)',
+            initial
+        };
     };
 
     const fetchMessages = async () => {
@@ -454,7 +465,7 @@ const FileTransferChatView = ({
                         style={{
                             position: 'absolute',
                             top: 0, left: 0, right: 0, bottom: 0,
-                            background: 'rgba(0,0,0,0.6)',
+                            background: 'var(--wt-overlay-background)',
                             backdropFilter: 'blur(4px)',
                             zIndex: 99999, // Ensure it's on top of everything
                             display: 'flex',
@@ -464,16 +475,16 @@ const FileTransferChatView = ({
                         }}
                     >
                         <div style={{
-                            border: '4px dashed rgba(255,255,255,0.8)',
+                            border: '4px dashed var(--wt-overlay-border)',
                             borderRadius: '16px',
                             padding: '40px',
                             display: 'flex',
                             flexDirection: 'column',
                             alignItems: 'center',
                             gap: '16px',
-                            color: '#fff'
+                            color: 'var(--wt-overlay-color)'
                         }}>
-                            <Folder size={64} color="#fff" strokeWidth={1.5} />
+                            <Folder size={64} color="currentColor" strokeWidth={1.5} />
                             <div style={{ fontSize: '24px', fontWeight: 'bold' }}>Drop to Send</div>
                         </div>
                     </motion.div>
@@ -521,7 +532,7 @@ const FileTransferChatView = ({
                                 style={{
                                     overflow: 'hidden',
                                     background: avatar.isImg ? 'transparent' : avatar.color,
-                                    color: '#fff',
+                                    color: avatar.textColor,
                                     display: 'flex',
                                     alignItems: 'center',
                                     justifyContent: 'center',
@@ -828,7 +839,12 @@ const FileTransferChatView = ({
                             <div style={{ fontWeight: 900, fontSize: '14px' }}>FULL SCREEN EDIT</div>
                             <button
                                 onClick={() => setShowFullScreen(false)}
-                                style={{ background: 'transparent', border: 'none', cursor: 'pointer' }}
+                                style={{
+                                    background: 'transparent',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    color: 'var(--text-primary)'
+                                }}
                             >
                                 <Minimize2 size={20} />
                             </button>

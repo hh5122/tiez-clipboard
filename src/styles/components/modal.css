@@ -1,16 +1,20 @@
 /* Modal & App Selector Styles */
 .modal-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  position: fixed;
+  inset: -6px;
+  background: rgba(8, 12, 18, 0.56);
+  backdrop-filter: blur(10px) saturate(115%);
+  -webkit-backdrop-filter: blur(10px) saturate(115%);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: 3000;
   padding: 20px;
+  border-radius: 0;
+}
+
+body:has(.modal-overlay) #root {
+  border-color: transparent !important;
 }
 
 .modal-content {
