@@ -1,9 +1,9 @@
-use crate::domain::models::ClipboardEntry;
 use crate::database::save_image_to_file;
+use crate::domain::models::ClipboardEntry;
 use base64::{engine::general_purpose, Engine as _};
 use regex::Regex;
-use serde::Deserialize;
 use reqwest::header::CONTENT_TYPE;
+use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -18,8 +18,16 @@ const TEXT_PREVIEW_TRUNCATED_CHARS: usize = TEXT_PREVIEW_MAX_CHARS - 3;
 const RICH_TEXT_PREVIEW_FALLBACK: &str = "[Rich Text Content]";
 pub const RICH_IMAGE_FALLBACK_PREFIX: &str = "<!--TIEZ_RICH_IMAGE:";
 pub const RICH_IMAGE_FALLBACK_SUFFIX: &str = "-->";
+pub const RICH_NAMED_FORMATS_PREFIX: &str = "<!--TIEZ_RICH_FORMATS:";
+pub const RICH_NAMED_FORMATS_SUFFIX: &str = "-->";
 const REMOTE_IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const REMOTE_IMAGE_TIMEOUT_SECS: u64 = 4;
+
+#[derive(Serialize, Deserialize)]
+struct StoredNamedClipboardFormat {
+    name: String,
+    data_base64: String,
+}
 
 fn normalize_image_ext(ext: &str) -> Option<&'static str> {
     match ext.to_ascii_lowercase().as_str() {
@@ -96,11 +104,7 @@ fn fetch_remote_image(url: &str) -> Option<(Vec<u8>, &'static str)> {
             .unwrap_or_else(|_| reqwest::blocking::Client::new())
     });
 
-    let resp = client
-        .get(url)
-        .header("Accept", "image/*")
-        .send()
-        .ok()?;
+    let resp = client.get(url).header("Accept", "image/*").send().ok()?;
 
     if !resp.status().is_success() {
         return None;
@@ -136,6 +140,165 @@ fn fetch_remote_image(url: &str) -> Option<(Vec<u8>, &'static str)> {
         .or_else(|| image_ext_from_bytes(&bytes))?;
 
     Some((bytes, ext))
+}
+
+fn normalize_html_image_src_candidate(src: &str) -> Option<String> {
+    let trimmed = src.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = if trimmed.starts_with("data:") {
+        trimmed.to_string()
+    } else {
+        let first_candidate = trimmed
+            .split(',')
+            .next()
+            .unwrap_or(trimmed)
+            .split_whitespace()
+            .next()
+            .unwrap_or(trimmed)
+            .trim();
+        first_candidate.replace("&amp;", "&")
+    };
+
+    if normalized.is_empty()
+        || normalized.starts_with("blob:")
+        || normalized.starts_with("javascript:")
+    {
+        return None;
+    }
+
+    Some(normalized)
+}
+
+fn looks_like_gif_image_src(src: &str) -> bool {
+    let lower = src.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+
+    lower.starts_with("data:image/gif")
+        || lower.contains(".gif")
+        || lower.contains("format=gif")
+        || lower.contains("fm=gif")
+        || lower.contains("mime=image/gif")
+        || lower.contains("image/gif")
+}
+
+fn resolve_local_image_src_path(src: &str) -> Option<std::path::PathBuf> {
+    let is_local = src.starts_with("file://")
+        || (src.len() > 2
+            && src.chars().nth(1) == Some(':')
+            && (src.chars().nth(2) == Some('\\') || src.chars().nth(2) == Some('/')));
+    if !is_local {
+        return None;
+    }
+
+    let path_str = if src.starts_with("file://") {
+        let raw_path = src.trim_start_matches("file://");
+        if raw_path.starts_with('/') && raw_path.chars().nth(2) == Some(':') {
+            &raw_path[1..]
+        } else {
+            raw_path
+        }
+    } else {
+        src
+    };
+
+    let decoded_path = decode(path_str)
+        .map(|p| p.into_owned())
+        .unwrap_or(path_str.to_string());
+    let clean_path = decoded_path
+        .split('?')
+        .next()
+        .unwrap_or(&decoded_path)
+        .split('#')
+        .next()
+        .unwrap_or(&decoded_path);
+    let path = std::path::Path::new(clean_path);
+    if !path.exists() {
+        return None;
+    }
+
+    Some(path.to_path_buf())
+}
+
+fn gif_data_url_from_bytes(bytes: &[u8]) -> Option<String> {
+    let ext = image_ext_from_bytes(bytes).or_else(|| {
+        if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+            Some("gif")
+        } else {
+            None
+        }
+    })?;
+    if ext != "gif" {
+        return None;
+    }
+
+    let b64 = general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:{};base64,{}", image_mime_by_ext(ext), b64))
+}
+
+fn resolve_animated_image_src_to_data_url(src: &str) -> Option<String> {
+    let value = src.trim();
+    if value.starts_with("data:image/gif") {
+        return Some(value.to_string());
+    }
+
+    if !looks_like_gif_image_src(value) {
+        return None;
+    }
+
+    if let Some(path) = resolve_local_image_src_path(value) {
+        let bytes = std::fs::read(&path).ok()?;
+        return gif_data_url_from_bytes(&bytes);
+    }
+
+    if let Some(remote_url) = normalize_remote_img_url(value) {
+        let (bytes, ext) = fetch_remote_image(&remote_url)?;
+        if ext == "gif" {
+            return gif_data_url_from_bytes(&bytes);
+        }
+    }
+
+    None
+}
+
+pub fn extract_animated_image_data_url_from_html(html: &str) -> Option<String> {
+    if html.trim().is_empty() {
+        return None;
+    }
+
+    static IMG_TAG_RE: OnceLock<Regex> = OnceLock::new();
+    static IMG_ATTR_RE: OnceLock<Regex> = OnceLock::new();
+
+    let img_tag_re = IMG_TAG_RE.get_or_init(|| Regex::new(r"(?is)<img\b[^>]*>").unwrap());
+    let img_attr_re = IMG_ATTR_RE.get_or_init(|| {
+        Regex::new(r#"(?is)(src|data-src|data-original|data-actualsrc|srcset)\s*=\s*["']([^"']+)["']"#)
+            .unwrap()
+    });
+
+    for tag in img_tag_re.find_iter(html) {
+        for caps in img_attr_re.captures_iter(tag.as_str()) {
+            let Some(raw_src) = caps.get(2).map(|m| m.as_str()) else {
+                continue;
+            };
+            let Some(candidate) = normalize_html_image_src_candidate(raw_src) else {
+                continue;
+            };
+            if let Some(data_url) = resolve_animated_image_src_to_data_url(&candidate) {
+                return Some(data_url);
+            }
+        }
+    }
+
+    None
+}
+
+pub fn extract_animated_image_data_url_from_text(text: &str) -> Option<String> {
+    let candidate = normalize_html_image_src_candidate(text)?;
+    resolve_animated_image_src_to_data_url(&candidate)
 }
 
 fn save_image_bytes_to_attachments(
@@ -180,7 +343,10 @@ fn truncate_chars_with_suffix(text: &str, max_chars: usize, suffix: &str) -> Str
 fn collapse_preview_whitespace(text: &str) -> String {
     static WHITESPACE_RE: OnceLock<Regex> = OnceLock::new();
 
-    let normalized = text.replace("\r\n", "\n").replace('\r', "\n").replace('\n', " ");
+    let normalized = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', " ");
     WHITESPACE_RE
         .get_or_init(|| Regex::new(r"\s+").unwrap())
         .replace_all(&normalized, " ")
@@ -205,7 +371,11 @@ fn normalize_plain_text_layout(text: &str) -> String {
     for raw_line in normalized.lines() {
         let line = collapse_line_whitespace(raw_line);
         if line.is_empty() {
-            if !lines.last().map(|last: &String| last.is_empty()).unwrap_or(false) {
+            if !lines
+                .last()
+                .map(|last: &String| last.is_empty())
+                .unwrap_or(false)
+            {
                 lines.push(String::new());
             }
         } else {
@@ -261,9 +431,15 @@ fn strip_leading_office_metadata_text(text: &str) -> String {
         return normalized;
     }
 
-    let lower = normalized.to_ascii_lowercase();
+    // Strip CF_HTML header if present in this context
+    let stripped_header = normalize_clipboard_plain_text(&normalized);
+    if stripped_header.is_empty() {
+        return String::new();
+    }
+
+    let lower = stripped_header.to_ascii_lowercase();
     if !(lower.contains("microsoftinternetexplorer") || lower.contains("documentnotspecified")) {
-        return normalized;
+        return stripped_header;
     }
 
     let stripped = OFFICE_METADATA_PREFIX_RE
@@ -273,12 +449,12 @@ fn strip_leading_office_metadata_text(text: &str) -> String {
             )
             .unwrap()
         })
-        .replace(&normalized, "")
+        .replace(&stripped_header, "")
         .trim()
         .to_string();
 
     if stripped.is_empty() {
-        normalized
+        stripped_header
     } else {
         stripped
     }
@@ -298,6 +474,14 @@ fn extract_renderable_html_region(html: &str) -> String {
         let start = start_idx + "<!--StartFragment-->".len();
         if let Some(end_rel) = trimmed[start..].find("<!--EndFragment-->") {
             return trimmed[start..start + end_rel].trim().to_string();
+        }
+    }
+
+    // Fallback: If it has CF_HTML header but no markers, try to strip the header
+    if looks_like_cf_html_header_text(trimmed) {
+        let stripped = normalize_clipboard_plain_text(trimmed);
+        if !stripped.is_empty() && stripped.len() < trimmed.len() {
+            return stripped;
         }
     }
 
@@ -389,7 +573,9 @@ fn strip_office_preview_noise(text: &str) -> String {
         .into_owned();
 
     if let Some(renderable_match) = RENDERABLE_CONTENT_TAG_RE
-        .get_or_init(|| Regex::new(r"(?is)<(table|p|div|span|img|a|ul|ol|li|blockquote|pre|h[1-6])\b").unwrap())
+        .get_or_init(|| {
+            Regex::new(r"(?is)<(table|p|div|span|img|a|ul|ol|li|blockquote|pre|h[1-6])\b").unwrap()
+        })
         .find(&processed)
     {
         let prefix = &processed[..renderable_match.start()];
@@ -401,33 +587,29 @@ fn strip_office_preview_noise(text: &str) -> String {
     processed.trim().to_string()
 }
 
-fn looks_like_html_fragment(text: &str) -> bool {
-    let repaired = strip_office_preview_noise(text);
-    let trimmed = repaired.trim_start_matches('\u{feff}').trim_start();
+fn looks_like_html_fragment_shallow(text: &str) -> bool {
+    let trimmed = text.trim_start_matches('\u{feff}').trim_start();
     if trimmed.starts_with('<') {
         return true;
     }
 
+    if looks_like_cf_html_header_text(trimmed) {
+        return false;
+    }
+
     let lower = trimmed.to_ascii_lowercase();
     [
-        "table ",
-        "tbody",
-        "thead",
-        "tfoot",
-        "tr ",
-        "td ",
-        "th ",
-        "col ",
-        "colgroup",
-        "div ",
-        "span ",
-        "p ",
-        "meta ",
-        "style ",
+        "table ", "tbody", "thead", "tfoot", "tr ", "td ", "th ", "col ", "colgroup", "div ",
+        "span ", "p ", "meta ", "style ",
     ]
     .iter()
     .any(|prefix| lower.starts_with(prefix))
         || (lower.contains("cellpadding=") && lower.contains("cellspacing="))
+}
+
+fn looks_like_html_fragment(text: &str) -> bool {
+    let repaired = strip_office_preview_noise(text);
+    looks_like_html_fragment_shallow(&repaired)
 }
 
 fn sanitize_rich_text_plain_text(text: &str) -> String {
@@ -454,8 +636,10 @@ fn extract_plain_text_from_htmlish(text: &str) -> String {
     }
     let with_breaks = BREAK_TAG_RE
         .get_or_init(|| {
-            Regex::new(r"(?is)</?(?:br|p|div|li|tr|td|th|table|h[1-6]|section|article|ul|ol)\b[^>]*>")
-                .unwrap()
+            Regex::new(
+                r"(?is)</?(?:br|p|div|li|tr|td|th|table|h[1-6]|section|article|ul|ol)\b[^>]*>",
+            )
+            .unwrap()
         })
         .replace_all(&repaired, "\n");
     let without_tags = TAG_RE
@@ -484,10 +668,166 @@ fn looks_like_obsidian_callout_markdown(text: &str) -> bool {
         .unwrap_or("");
 
     OBSIDIAN_CALLOUT_RE
-        .get_or_init(|| {
-            Regex::new(r"(?i)^>\s*\[\![a-z0-9_-]+\](?:[+-])?(?:\s+.+)?$").unwrap()
-        })
+        .get_or_init(|| Regex::new(r"(?i)^>\s*\[\![a-z0-9_-]+\](?:[+-])?(?:\s+.+)?$").unwrap())
         .is_match(first_non_empty)
+}
+
+fn source_app_likely_formats_rich_text(source_app: &str, source_app_path: Option<&str>) -> bool {
+    let mut haystack = source_app.to_ascii_lowercase();
+    if let Some(path) = source_app_path {
+        if !haystack.is_empty() {
+            haystack.push(' ');
+        }
+        haystack.push_str(&path.to_ascii_lowercase());
+    }
+
+    [
+        "wps",
+        "winword",
+        "word",
+        "excel",
+        "powerpoint",
+        "onenote",
+        "outlook",
+        "soffice",
+        "libreoffice",
+        "writer",
+        "calc",
+        "impress",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
+}
+
+fn plain_text_has_rich_html_signals(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+
+    lower.contains("<!--startfragment-->")
+        || lower.contains("<!--endfragment-->")
+        || lower.contains("<html")
+        || lower.contains("<body")
+        || lower.contains("<meta")
+        || lower.contains("<style")
+        || lower.contains("mso-")
+        || lower.contains("documentnotspecified")
+        || lower.contains("microsoftinternetexplorer")
+        || lower.contains("class=mso")
+        || lower.contains("class=\"mso")
+        || lower.contains("cellpadding=")
+        || lower.contains("cellspacing=")
+}
+
+pub fn looks_like_cf_html_header_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("version:0.9")
+        || (lower.contains("starthtml:") && lower.contains("startfragment:"))
+}
+
+pub fn normalize_clipboard_plain_text(text: &str) -> String {
+    static INLINE_CF_HTML_HEADER_RE: OnceLock<Regex> = OnceLock::new();
+
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    if !looks_like_cf_html_header_text(&normalized) {
+        return normalized;
+    }
+
+    // Try parsing as CF_HTML first to get any legitimate fragments
+    if let Some(html) = parse_cf_html(normalized.as_bytes()) {
+        let plain = extract_plain_text_from_htmlish(&html);
+        if !plain.trim().is_empty() {
+            return plain;
+        }
+    }
+
+    // Aggressively strip header metadata lines if present
+    let mut lines = normalized.lines();
+    let mut cleaned_lines = Vec::new();
+    let mut in_header = true;
+
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+        if in_header {
+            let lower = trimmed.to_lowercase();
+            let is_header_key = lower.starts_with("version:")
+                || lower.starts_with("starthtml:")
+                || lower.starts_with("endhtml:")
+                || lower.starts_with("startfragment:")
+                || lower.starts_with("endfragment:")
+                || lower.starts_with("sourceurl:");
+
+            if is_header_key || trimmed.is_empty() {
+                continue;
+            }
+            // First line that doesn't look like a header key ends the header
+            in_header = false;
+        }
+        cleaned_lines.push(line);
+    }
+
+    let result = cleaned_lines.join("\n").trim().to_string();
+    if !result.is_empty() && result != normalized {
+        if looks_like_html_fragment(&result) {
+            let plain = extract_plain_text_from_htmlish(&result);
+            if !plain.trim().is_empty() {
+                return plain;
+            }
+        }
+        return result;
+    }
+
+    let stripped_inline = INLINE_CF_HTML_HEADER_RE
+        .get_or_init(|| {
+            Regex::new(
+                r"(?is)\b(?:version:\s*[^\s]+|starthtml:\s*\d+|endhtml:\s*\d+|startfragment:\s*\d+|endfragment:\s*\d+|sourceurl:\s*\S+)",
+            )
+            .unwrap()
+        })
+        .replace_all(&normalized, " ");
+    let inline_result = normalize_plain_text_layout(stripped_inline.as_ref())
+        .trim()
+        .to_string();
+
+    if inline_result.is_empty() {
+        return normalized;
+    }
+
+    if looks_like_html_fragment(&inline_result) {
+        let plain = extract_plain_text_from_htmlish(&inline_result);
+        if !plain.trim().is_empty() {
+            return plain;
+        }
+    }
+
+    inline_result
+}
+
+pub fn infer_rich_html_from_plain_text(
+    text: &str,
+    source_app: &str,
+    source_app_path: Option<&str>,
+) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let html = parse_cf_html(trimmed.as_bytes())?;
+    let plain_text = extract_plain_text_from_htmlish(&html);
+    if plain_text.is_empty() {
+        return None;
+    }
+
+    let normalized_source = collapse_preview_whitespace(trimmed);
+    let normalized_plain = collapse_preview_whitespace(&plain_text);
+    let materially_differs = normalized_source != normalized_plain;
+
+    if plain_text_has_rich_html_signals(trimmed)
+        || (source_app_likely_formats_rich_text(source_app, source_app_path) && materially_differs)
+    {
+        return Some(html);
+    }
+
+    None
 }
 
 pub fn derive_rich_text_content(content: &str, html_content: Option<&str>) -> String {
@@ -513,7 +853,11 @@ pub fn derive_rich_text_content(content: &str, html_content: Option<&str>) -> St
     sanitized_plain
 }
 
-pub fn build_entry_preview(content_type: &str, content: &str, html_content: Option<&str>) -> String {
+pub fn build_entry_preview(
+    content_type: &str,
+    content: &str,
+    html_content: Option<&str>,
+) -> String {
     if content_type == "image" {
         return "[Image Content]".to_string();
     }
@@ -534,11 +878,14 @@ pub fn build_entry_preview(content_type: &str, content: &str, html_content: Opti
             preview
         }
     } else {
-        collapse_preview_whitespace(content)
+        collapse_preview_whitespace(&normalize_clipboard_plain_text(content))
     };
 
     if preview_text.chars().count() > TEXT_PREVIEW_MAX_CHARS {
-        let preview_text: String = preview_text.chars().take(TEXT_PREVIEW_TRUNCATED_CHARS).collect();
+        let preview_text: String = preview_text
+            .chars()
+            .take(TEXT_PREVIEW_TRUNCATED_CHARS)
+            .collect();
         format!("{}...", preview_text)
     } else {
         preview_text
@@ -547,7 +894,11 @@ pub fn build_entry_preview(content_type: &str, content: &str, html_content: Opti
 
 pub fn attach_rich_image_fallback(html: &str, payload: &str) -> String {
     let mut out = String::with_capacity(
-        html.len() + RICH_IMAGE_FALLBACK_PREFIX.len() + RICH_IMAGE_FALLBACK_SUFFIX.len() + payload.len() + 1,
+        html.len()
+            + RICH_IMAGE_FALLBACK_PREFIX.len()
+            + RICH_IMAGE_FALLBACK_SUFFIX.len()
+            + payload.len()
+            + 1,
     );
     out.push_str(html.trim_end());
     out.push('\n');
@@ -572,6 +923,88 @@ pub fn split_rich_html_and_image_fallback(html: &str) -> (String, Option<String>
     (html.to_string(), None)
 }
 
+pub fn attach_rich_named_formats(
+    html: &str,
+    formats: &[crate::infrastructure::windows_api::win_clipboard::NamedClipboardFormat],
+) -> String {
+    let stored: Vec<StoredNamedClipboardFormat> = formats
+        .iter()
+        .filter(|format| !format.name.trim().is_empty() && !format.data.is_empty())
+        .map(|format| StoredNamedClipboardFormat {
+            name: format.name.clone(),
+            data_base64: general_purpose::STANDARD.encode(&format.data),
+        })
+        .collect();
+
+    if stored.is_empty() {
+        return html.to_string();
+    }
+
+    let Ok(payload_json) = serde_json::to_vec(&stored) else {
+        return html.to_string();
+    };
+
+    let payload = general_purpose::STANDARD.encode(payload_json);
+    let mut out = String::with_capacity(
+        html.len()
+            + RICH_NAMED_FORMATS_PREFIX.len()
+            + RICH_NAMED_FORMATS_SUFFIX.len()
+            + payload.len()
+            + 1,
+    );
+    out.push_str(html.trim_end());
+    out.push('\n');
+    out.push_str(RICH_NAMED_FORMATS_PREFIX);
+    out.push_str(&payload);
+    out.push_str(RICH_NAMED_FORMATS_SUFFIX);
+    out
+}
+
+pub fn split_rich_html_and_named_formats(
+    html: &str,
+) -> (
+    String,
+    Vec<crate::infrastructure::windows_api::win_clipboard::NamedClipboardFormat>,
+) {
+    if let Some(start) = html.rfind(RICH_NAMED_FORMATS_PREFIX) {
+        let marker_start = start + RICH_NAMED_FORMATS_PREFIX.len();
+        if let Some(end_rel) = html[marker_start..].find(RICH_NAMED_FORMATS_SUFFIX) {
+            let marker_end = marker_start + end_rel;
+            let payload = html[marker_start..marker_end].trim();
+
+            let decoded = general_purpose::STANDARD.decode(payload);
+            let parsed = decoded
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Vec<StoredNamedClipboardFormat>>(&bytes).ok())
+                .map(|items| {
+                    items
+                        .into_iter()
+                        .filter_map(|item| {
+                            let data = general_purpose::STANDARD.decode(item.data_base64).ok()?;
+                            if item.name.trim().is_empty() || data.is_empty() {
+                                return None;
+                            }
+                            Some(
+                                crate::infrastructure::windows_api::win_clipboard::NamedClipboardFormat {
+                                    name: item.name,
+                                    data,
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                });
+
+            if let Some(formats) = parsed {
+                let mut cleaned = String::with_capacity(html.len());
+                cleaned.push_str(&html[..start]);
+                cleaned.push_str(&html[marker_end + RICH_NAMED_FORMATS_SUFFIX.len()..]);
+                return (cleaned.trim().to_string(), formats);
+            }
+        }
+    }
+    (html.to_string(), Vec::new())
+}
+
 pub fn externalize_rich_image_fallback(html: &str, data_dir: &Path) -> String {
     let (clean_html, payload_opt) = split_rich_html_and_image_fallback(html);
     let Some(payload) = payload_opt else {
@@ -583,7 +1016,11 @@ pub fn externalize_rich_image_fallback(html: &str, data_dir: &Path) -> String {
     }
 
     if let Some(saved_path) = save_image_to_file(&payload, data_dir) {
-        let base_html = if clean_html.trim().is_empty() { html } else { clean_html.as_str() };
+        let base_html = if clean_html.trim().is_empty() {
+            html
+        } else {
+            clean_html.as_str()
+        };
         return attach_rich_image_fallback(base_html, &saved_path);
     }
 
@@ -678,14 +1115,23 @@ pub fn truncate_html_for_preview(html: &str) -> Option<String> {
         return Some(out);
     }
 
-    Some(truncate_chars_with_suffix(trimmed, HTML_PREVIEW_MAX_CHARS, HTML_TRUNCATION_SUFFIX))
+    Some(truncate_chars_with_suffix(
+        trimmed,
+        HTML_PREVIEW_MAX_CHARS,
+        HTML_TRUNCATION_SUFFIX,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        app_cleanup_policy_matches, apply_cleanup_rules, build_entry_preview,
-        derive_rich_text_content, parse_app_cleanup_policies, parse_cf_html, parse_cleanup_rules,
+        app_cleanup_policy_matches, apply_cleanup_rules, attach_rich_image_fallback,
+        attach_rich_named_formats, build_entry_preview, collapse_preview_whitespace,
+        derive_rich_text_content, extract_animated_image_data_url_from_html,
+        extract_animated_image_data_url_from_text,
+        infer_rich_html_from_plain_text, normalize_clipboard_plain_text,
+        parse_app_cleanup_policies, parse_cf_html, parse_cleanup_rules,
+        split_rich_html_and_image_fallback, split_rich_html_and_named_formats,
         truncate_html_for_preview, AppCleanupPolicy,
     };
 
@@ -724,7 +1170,8 @@ mod tests {
 
     #[test]
     fn rich_text_content_prefers_renderable_html_over_wps_plain_text_noise() {
-        let text = "1 1 1 1 MicrosoftInternetExplorer4 0 2 DocumentNotSpecified 7.8 磅 Normal 0 顶顶顶顶";
+        let text =
+            "1 1 1 1 MicrosoftInternetExplorer4 0 2 DocumentNotSpecified 7.8 磅 Normal 0 顶顶顶顶";
         let html = "<html><head><meta charset=\"utf-8\"><style>body{font-family:\"Times New Roman\";}</style></head><body><p>顶顶顶顶</p></body></html>";
 
         let content = derive_rich_text_content(text, Some(html));
@@ -744,11 +1191,45 @@ mod tests {
     #[test]
     fn rich_text_content_preserves_obsidian_callout_markdown() {
         let text = "> [!note]- Important\n> Keep the markdown callout syntax";
-        let html = "<blockquote><p>Important</p><p>Keep the markdown callout syntax</p></blockquote>";
+        let html =
+            "<blockquote><p>Important</p><p>Keep the markdown callout syntax</p></blockquote>";
 
         let content = derive_rich_text_content(text, Some(html));
 
         assert_eq!(content, text);
+    }
+
+    #[test]
+    fn infer_rich_html_from_plain_text_promotes_wps_table_fragment() {
+        let text =
+            "table border=0 cellpadding=0 cellspacing=0><tr><td>学院意见</td><td>通过</td></tr>";
+
+        let html = infer_rich_html_from_plain_text(
+            text,
+            "WPS Office",
+            Some("C:\\Program Files\\Kingsoft\\wps.exe"),
+        )
+        .expect("wps html-ish text should promote to rich html");
+
+        assert!(html.starts_with("<table"));
+        assert!(html.contains("<td>学院意见</td>"));
+        assert_eq!(
+            collapse_preview_whitespace(&derive_rich_text_content(text, Some(&html))),
+            "学院意见 通过"
+        );
+    }
+
+    #[test]
+    fn infer_rich_html_from_plain_text_keeps_html_source_from_editor_as_code() {
+        let text = "<div class=\"note\">hello</div>";
+
+        let html = infer_rich_html_from_plain_text(
+            text,
+            "Visual Studio Code",
+            Some("C:\\Program Files\\Microsoft VS Code\\Code.exe"),
+        );
+
+        assert!(html.is_none());
     }
 
     #[test]
@@ -767,12 +1248,126 @@ mod tests {
     }
 
     #[test]
+    fn rich_named_formats_round_trip_without_touching_html() {
+        let html = "<table><tr><td>A</td><td>B</td></tr></table>";
+        let formats = vec![
+            crate::infrastructure::windows_api::win_clipboard::NamedClipboardFormat {
+                name: "Rich Text Format".to_string(),
+                data: b"{\\rtf1\\ansi A\\tab B}".to_vec(),
+            },
+            crate::infrastructure::windows_api::win_clipboard::NamedClipboardFormat {
+                name: "Biff8".to_string(),
+                data: vec![1, 2, 3, 4],
+            },
+        ];
+
+        let tagged = attach_rich_named_formats(html, &formats);
+        let (cleaned, restored) = split_rich_html_and_named_formats(&tagged);
+
+        assert_eq!(cleaned, html);
+        assert_eq!(restored, formats);
+    }
+
+    #[test]
+    fn rich_named_formats_and_image_fallback_can_coexist() {
+        let html = "<table><tr><td>Excel</td></tr></table>";
+        let html = attach_rich_image_fallback(html, "data:image/png;base64,AAAA");
+        let formats = vec![
+            crate::infrastructure::windows_api::win_clipboard::NamedClipboardFormat {
+                name: "Biff12".to_string(),
+                data: vec![9, 8, 7],
+            },
+        ];
+
+        let tagged = attach_rich_named_formats(&html, &formats);
+        let (without_formats, restored_formats) = split_rich_html_and_named_formats(&tagged);
+        let (cleaned, restored_image) = split_rich_html_and_image_fallback(&without_formats);
+
+        assert_eq!(restored_formats, formats);
+        assert_eq!(
+            restored_image.as_deref(),
+            Some("data:image/png;base64,AAAA")
+        );
+        assert_eq!(cleaned, "<table><tr><td>Excel</td></tr></table>");
+    }
+
+    #[test]
+    fn extract_animated_image_data_url_from_html_prefers_data_gif() {
+        let gif_data_url =
+            "data:image/gif;base64,R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==";
+        let html = format!(r#"<div><img src="{gif_data_url}" alt="gif" /></div>"#);
+
+        let extracted = extract_animated_image_data_url_from_html(&html);
+
+        assert_eq!(extracted.as_deref(), Some(gif_data_url));
+    }
+
+    #[test]
+    fn extract_animated_image_data_url_from_html_ignores_static_png() {
+        let html = r#"<div><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA" /></div>"#;
+
+        let extracted = extract_animated_image_data_url_from_html(html);
+
+        assert!(extracted.is_none());
+    }
+
+    #[test]
+    fn extract_animated_image_data_url_from_text_accepts_direct_gif_data_url() {
+        let gif_data_url =
+            "data:image/gif;base64,R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==";
+
+        let extracted = extract_animated_image_data_url_from_text(gif_data_url);
+
+        assert_eq!(extracted.as_deref(), Some(gif_data_url));
+    }
+
+    #[test]
     fn parse_cf_html_repairs_missing_opening_bracket() {
         let raw = b"Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n<!--StartFragment-->table border=0 cellpadding=0 cellspacing=0><tr><td>A</td></tr><!--EndFragment-->";
         let parsed = parse_cf_html(raw).expect("cf_html should parse");
 
         assert!(parsed.starts_with("<table"));
         assert!(parsed.contains("<td>A</td>"));
+    }
+
+    #[test]
+    fn parse_cf_html_handles_fragment_offsets_without_line_break_separator() {
+        let raw = b"Version:0.9\r\nStartHTML:0000000105\r\nEndHTML:0000000189\r\nStartFragment:0000000141EndFragment:0000000173\r\n<!--StartFragment--><p>Hello</p><!--EndFragment-->";
+        let parsed = parse_cf_html(raw)
+            .expect("cf_html should parse from markers when offsets are malformed");
+
+        assert!(!parsed.contains("StartHTML:"));
+        assert!(!parsed.contains("StartFragment:"));
+        assert!(parsed.contains("<p>Hello</p>"));
+    }
+
+    #[test]
+    fn parse_cf_html_does_not_return_raw_header_when_only_fragment_like_payload_survives() {
+        let raw = b"Version:0.9\r\nStartHTML:0000000105\r\nEndHTML:0000000829\r\nStartFragment:0000000141EndFragment:0000000793\r\ntable border=0 cellpadding=0 cellspacing=0><tr><td>A</td></tr>";
+        let parsed = parse_cf_html(raw).expect("cf_html should recover fragment-like payload");
+
+        assert!(parsed.starts_with("<table"), "parsed={parsed:?}");
+        assert!(parsed.contains("<td>A</td>"));
+        assert!(!parsed.contains("Version:0.9"));
+        assert!(!parsed.contains("StartHTML:"));
+    }
+
+    #[test]
+    fn normalize_clipboard_plain_text_strips_cf_html_header_prefix() {
+        let text = "Version:0.9 StartHTML:0000000105 EndHTML:0000000829 StartFragment:0000000141 EndFragment:0000000793 ddd";
+
+        let normalized = normalize_clipboard_plain_text(text);
+
+        assert_eq!(normalized, "ddd");
+    }
+
+    #[test]
+    fn text_preview_drops_cf_html_header_noise_for_plain_text_items() {
+        let text = "Version:0.9 StartHTML:0000000105 EndHTML:0000000829 StartFragment:0000000141 EndFragment:0000000793 ddd";
+
+        let preview = build_entry_preview("text", text, None);
+
+        assert_eq!(preview, "ddd");
     }
 
     #[test]
@@ -836,21 +1431,51 @@ pub fn detect_content_type(text: &str) -> String {
 
     let mut score = 0;
     let keywords = [
-        "import ", "const ", "let ", "var ", "function ", "class ", "pub fn ", "impl ",
-        "#include", "package ", "interface ", "namespace ", "void ", "return ", "if (", "for (", "while (", "=>",
+        "import ",
+        "const ",
+        "let ",
+        "var ",
+        "function ",
+        "class ",
+        "pub fn ",
+        "impl ",
+        "#include",
+        "package ",
+        "interface ",
+        "namespace ",
+        "void ",
+        "return ",
+        "if (",
+        "for (",
+        "while (",
+        "=>",
     ];
 
     for k in keywords {
-        if text.contains(k) { score += 1; }
+        if text.contains(k) {
+            score += 1;
+        }
     }
 
-    if text.contains(";") { score += 1; }
-    if text.contains("{") && text.contains("}") { score += 1; }
-    if text.contains("</") && text.contains(">") { score += 2; }
+    if text.contains(";") {
+        score += 1;
+    }
+    if text.contains("{") && text.contains("}") {
+        score += 1;
+    }
+    if text.contains("</") && text.contains(">") {
+        score += 2;
+    }
 
-    if score >= 2 { return "code".to_string(); }
+    if score >= 2 {
+        return "code".to_string();
+    }
 
-    if trimmed.starts_with("{") && trimmed.ends_with("}") && text.contains(":") && text.contains("\"") {
+    if trimmed.starts_with("{")
+        && trimmed.ends_with("}")
+        && text.contains(":")
+        && text.contains("\"")
+    {
         return "code".to_string();
     }
 
@@ -863,25 +1488,43 @@ pub fn contains_sensitive_info(text: &str, kinds: &[String], custom_rules: &[Str
     static EMAIL_RE: OnceLock<Regex> = OnceLock::new();
     static SECRET_RE: OnceLock<Regex> = OnceLock::new();
 
-    if text.len() > 5000 || text.starts_with("data:") { return false; }
+    if text.len() > 5000 || text.starts_with("data:") {
+        return false;
+    }
 
     let has_kind = |k: &str| kinds.iter().any(|t| t == k);
 
     if has_kind("phone") {
-        let re = PHONE_RE.get_or_init(|| Regex::new(r"(?:\+?86)?[-\s\(]*1[3-9]\d{1}[-\s\)]*\d{4}[-\s]*\d{4}").unwrap());
-        if re.is_match(text) { return true; }
+        let re = PHONE_RE.get_or_init(|| {
+            Regex::new(r"(?:\+?86)?[-\s\(]*1[3-9]\d{1}[-\s\)]*\d{4}[-\s]*\d{4}").unwrap()
+        });
+        if re.is_match(text) {
+            return true;
+        }
     }
     if has_kind("idcard") {
-        let re = IDCARD_RE.get_or_init(|| Regex::new(r"\b[1-9]\d{5}[1-9]\d{3}((0\d)|(1[0-2]))(([0|1|2]\d)|3[0-1])\d{3}([0-9Xx])\b").unwrap());
-        if re.is_match(text) { return true; }
+        let re = IDCARD_RE.get_or_init(|| {
+            Regex::new(
+                r"\b[1-9]\d{5}[1-9]\d{3}((0\d)|(1[0-2]))(([0|1|2]\d)|3[0-1])\d{3}([0-9Xx])\b",
+            )
+            .unwrap()
+        });
+        if re.is_match(text) {
+            return true;
+        }
     }
     if has_kind("email") {
-        let re = EMAIL_RE.get_or_init(|| Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").unwrap());
-        if re.is_match(text) { return true; }
+        let re = EMAIL_RE
+            .get_or_init(|| Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").unwrap());
+        if re.is_match(text) {
+            return true;
+        }
     }
     if has_kind("secret") {
         let re = SECRET_RE.get_or_init(|| Regex::new(r"(?ix)((?:sk|pk|ghp|gho|github_pat|AIza|AKIA|ya29)[-_][\w\-]{20,}|(?:password|secret|api[_-]?key|access[_-]?key|token|bearer)[\s:=]+[\w\-]{16,})").unwrap());
-        if re.is_match(text) { return true; }
+        if re.is_match(text) {
+            return true;
+        }
     }
     if has_kind("password") {
         if text.len() >= 8 && text.len() <= 64 && !text.contains(' ') && !text.contains('\n') {
@@ -889,12 +1532,18 @@ pub fn contains_sensitive_info(text: &str, kinds: &[String], custom_rules: &[Str
             let has_lower = text.chars().any(|c| c.is_lowercase());
             let has_digit = text.chars().any(|c| c.is_numeric());
             let has_special = text.chars().any(|c| !c.is_alphanumeric());
-            if has_upper && has_lower && has_digit && has_special { return true; }
+            if has_upper && has_lower && has_digit && has_special {
+                return true;
+            }
         }
     }
 
     for rule in custom_rules {
-        if let Ok(re) = Regex::new(rule) { if re.is_match(text) { return true; } }
+        if let Ok(re) = Regex::new(rule) {
+            if re.is_match(text) {
+                return true;
+            }
+        }
     }
     false
 }
@@ -923,9 +1572,11 @@ pub fn parse_cleanup_rules(raw_rules: &str) -> Vec<(Regex, String)> {
 }
 
 pub fn apply_cleanup_rules(text: &str, rules: &[(Regex, String)]) -> String {
-    rules.iter().fold(text.to_string(), |acc, (regex, replacement)| {
-        regex.replace_all(&acc, replacement.as_str()).into_owned()
-    })
+    rules
+        .iter()
+        .fold(text.to_string(), |acc, (regex, replacement)| {
+            regex.replace_all(&acc, replacement.as_str()).into_owned()
+        })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1012,22 +1663,42 @@ pub fn embed_local_images(html: &str) -> String {
         let src = &caps[2];
         let suffix = &caps[3];
 
-        let is_local = src.starts_with("file://") || 
-            (src.len() > 2 && src.chars().nth(1) == Some(':') && (src.chars().nth(2) == Some('\\') || src.chars().nth(2) == Some('/')));
+        let is_local = src.starts_with("file://")
+            || (src.len() > 2
+                && src.chars().nth(1) == Some(':')
+                && (src.chars().nth(2) == Some('\\') || src.chars().nth(2) == Some('/')));
 
         if is_local {
             let path_str = if src.starts_with("file://") {
                 let raw_path = src.trim_start_matches("file://");
-                if raw_path.starts_with('/') && raw_path.chars().nth(2) == Some(':') { &raw_path[1..] } else { raw_path }
-            } else { src };
+                if raw_path.starts_with('/') && raw_path.chars().nth(2) == Some(':') {
+                    &raw_path[1..]
+                } else {
+                    raw_path
+                }
+            } else {
+                src
+            };
 
-            let decoded_path = decode(path_str).map(|p| p.into_owned()).unwrap_or(path_str.to_string());
-            let clean_path = decoded_path.split('?').next().unwrap_or(&decoded_path).split('#').next().unwrap_or(&decoded_path);
+            let decoded_path = decode(path_str)
+                .map(|p| p.into_owned())
+                .unwrap_or(path_str.to_string());
+            let clean_path = decoded_path
+                .split('?')
+                .next()
+                .unwrap_or(&decoded_path)
+                .split('#')
+                .next()
+                .unwrap_or(&decoded_path);
 
             let path = std::path::Path::new(clean_path);
             if path.exists() {
                 if let Ok(data) = std::fs::read(path) {
-                    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("png").to_lowercase();
+                    let ext = path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("png")
+                        .to_lowercase();
                     let mime = match ext.as_str() {
                         "jpg" | "jpeg" => "image/jpeg",
                         "gif" => "image/gif",
@@ -1037,7 +1708,12 @@ pub fn embed_local_images(html: &str) -> String {
                         _ => "image/png",
                     };
                     let b64 = general_purpose::STANDARD.encode(&data);
-                    return format!("{}{}{}", prefix, format!("data:{};base64,{}", mime, b64), suffix);
+                    return format!(
+                        "{}{}{}",
+                        prefix,
+                        format!("data:{};base64,{}", mime, b64),
+                        suffix
+                    );
                 }
             }
         }
@@ -1051,12 +1727,15 @@ pub fn embed_local_images(html: &str) -> String {
             }
         }
         format!("{}{}{}", prefix, src, suffix)
-    }).to_string()
+    })
+    .to_string()
 }
 
 pub fn process_local_images_in_html(html: &str, data_dir: &std::path::Path) -> String {
     let attachments_dir = data_dir.join("attachments");
-    if !attachments_dir.exists() { let _ = std::fs::create_dir_all(&attachments_dir); }
+    if !attachments_dir.exists() {
+        let _ = std::fs::create_dir_all(&attachments_dir);
+    }
 
     let re = match Regex::new(r#"(<img\s+[^>]*src=["'])([^"']+)(["'][^>]*>)"#) {
         Ok(r) => r,
@@ -1068,20 +1747,38 @@ pub fn process_local_images_in_html(html: &str, data_dir: &std::path::Path) -> S
         let src = &caps[2];
         let suffix = &caps[3];
 
-        let is_local = src.starts_with("file://") || 
-            (src.len() > 2 && src.chars().nth(1) == Some(':') && (src.chars().nth(2) == Some('\\') || src.chars().nth(2) == Some('/')));
+        let is_local = src.starts_with("file://")
+            || (src.len() > 2
+                && src.chars().nth(1) == Some(':')
+                && (src.chars().nth(2) == Some('\\') || src.chars().nth(2) == Some('/')));
 
         if is_local {
             let path_str = if src.starts_with("file://") {
                 let raw_path = src.trim_start_matches("file://");
-                if raw_path.starts_with('/') && raw_path.chars().nth(2) == Some(':') { &raw_path[1..] } else { raw_path }
-            } else { src };
+                if raw_path.starts_with('/') && raw_path.chars().nth(2) == Some(':') {
+                    &raw_path[1..]
+                } else {
+                    raw_path
+                }
+            } else {
+                src
+            };
 
-            let decoded_path = decode(path_str).map(|p| p.into_owned()).unwrap_or(path_str.to_string());
-            let clean_path = decoded_path.split('?').next().unwrap_or(&decoded_path).split('#').next().unwrap_or(&decoded_path);
+            let decoded_path = decode(path_str)
+                .map(|p| p.into_owned())
+                .unwrap_or(path_str.to_string());
+            let clean_path = decoded_path
+                .split('?')
+                .next()
+                .unwrap_or(&decoded_path)
+                .split('#')
+                .next()
+                .unwrap_or(&decoded_path);
             let path = std::path::Path::new(clean_path);
-            
-            if path.starts_with(&attachments_dir) { return format!("{}{}{}", prefix, src, suffix); }
+
+            if path.starts_with(&attachments_dir) {
+                return format!("{}{}{}", prefix, src, suffix);
+            }
 
             if path.exists() {
                 if let Ok(data) = std::fs::read(path) {
@@ -1089,15 +1786,25 @@ pub fn process_local_images_in_html(html: &str, data_dir: &std::path::Path) -> S
                     use std::hash::{Hash, Hasher};
                     data.hash(&mut hasher);
                     let hash = hasher.finish();
-                    
-                    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("png").to_lowercase();
+
+                    let ext = path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("png")
+                        .to_lowercase();
                     let new_filename = format!("img_{:x}.{}", hash, ext);
                     let new_path = attachments_dir.join(&new_filename);
-                    
-                    if !new_path.exists() { let _ = std::fs::write(&new_path, &data); }
-                    
+
+                    if !new_path.exists() {
+                        let _ = std::fs::write(&new_path, &data);
+                    }
+
                     let new_src = new_path.to_string_lossy().replace('\\', "/");
-                    let final_src = if new_src.starts_with('/') { format!("file://{}", new_src) } else { format!("file:///{}", new_src) };
+                    let final_src = if new_src.starts_with('/') {
+                        format!("file://{}", new_src)
+                    } else {
+                        format!("file:///{}", new_src)
+                    };
                     return format!("{}{}{}", prefix, final_src, suffix);
                 }
             }
@@ -1105,111 +1812,155 @@ pub fn process_local_images_in_html(html: &str, data_dir: &std::path::Path) -> S
 
         if let Some(remote_url) = normalize_remote_img_url(src) {
             if let Some((bytes, ext)) = fetch_remote_image(&remote_url) {
-                if let Some(file_src) = save_image_bytes_to_attachments(&bytes, ext, &attachments_dir) {
+                if let Some(file_src) =
+                    save_image_bytes_to_attachments(&bytes, ext, &attachments_dir)
+                {
                     return format!("{}{}{}", prefix, file_src, suffix);
                 }
             }
         }
         format!("{}{}{}", prefix, src, suffix)
-    }).to_string()
+    })
+    .to_string()
 }
 
 pub fn parse_cf_html(raw: &[u8]) -> Option<String> {
-    enum HtmlEncoding { Utf8, Utf16Le }
+    if raw.is_empty() {
+        return None;
+    }
+
+    enum HtmlEncoding {
+        Utf8,
+        Utf16Le,
+    }
 
     let detect_encoding = |data: &[u8]| -> HtmlEncoding {
-        if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xFE { return HtmlEncoding::Utf16Le; }
-        if data.len() % 2 == 0 {
-            let zero_count = data.iter().filter(|b| **b == 0).count();
-            if zero_count > data.len() / 4 { return HtmlEncoding::Utf16Le; }
+        if data.len() >= 2 && data[0] == 0xFF && data[1] == 0xFE {
+            return HtmlEncoding::Utf16Le;
+        }
+        // Heuristic for UTF-16LE
+        if data.len() >= 4 && data[1] == 0 && data[3] == 0 {
+            return HtmlEncoding::Utf16Le;
         }
         HtmlEncoding::Utf8
     };
 
-    let decode_bytes = |data: &[u8], encoding: &HtmlEncoding| -> String {
-        match encoding {
-            HtmlEncoding::Utf8 => String::from_utf8_lossy(data).to_string(),
-            HtmlEncoding::Utf16Le => {
-                let mut u16_buf = Vec::with_capacity(data.len() / 2);
-                let mut i = 0;
-                while i + 1 < data.len() {
-                    u16_buf.push(u16::from_le_bytes([data[i], data[i + 1]]));
-                    i += 2;
-                }
-                String::from_utf16_lossy(&u16_buf)
-            }
+    let encoding = detect_encoding(raw);
+    let raw_str = match encoding {
+        HtmlEncoding::Utf8 => String::from_utf8_lossy(raw).to_string(),
+        HtmlEncoding::Utf16Le => {
+            let u16_buf: Vec<u16> = raw
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&u16_buf)
         }
     };
 
-    let encoding = detect_encoding(raw);
-    let raw_str = decode_bytes(raw, &encoding);
-    let mut start_fragment: Option<usize> = None;
-    let mut end_fragment: Option<usize> = None;
-    let mut start_html: Option<usize> = None;
-    let mut end_html: Option<usize> = None;
+    let parse_offset = |key: &str| -> Option<usize> {
+        let idx = raw_str.find(key)?;
+        let val_start = idx + key.len();
+        let val_str: String = raw_str[val_start..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || c.is_whitespace())
+            .collect();
+        val_str.trim().parse::<usize>().ok()
+    };
 
-    for line in raw_str.lines() {
-        let trimmed = line.trim();
-        if let Some(val) = trimmed.strip_prefix("StartFragment:") {
-            if let Ok(pos) = val.trim().parse::<usize>() { start_fragment = Some(pos); }
-        } else if let Some(val) = trimmed.strip_prefix("EndFragment:") {
-            if let Ok(pos) = val.trim().parse::<usize>() { end_fragment = Some(pos); }
-        } else if let Some(val) = trimmed.strip_prefix("StartHTML:") {
-            if let Ok(pos) = val.trim().parse::<usize>() { start_html = Some(pos); }
-        } else if let Some(val) = trimmed.strip_prefix("EndHTML:") {
-            if let Ok(pos) = val.trim().parse::<usize>() { end_html = Some(pos); }
-        }
-        if trimmed.starts_with("<") { break; }
-    }
+    let start_html = parse_offset("StartHTML:");
+    let end_html = parse_offset("EndHTML:");
+    let start_frag = parse_offset("StartFragment:");
+    let end_frag = parse_offset("EndFragment:");
 
-    if let (Some(frag_s), Some(frag_e)) = (start_fragment, end_fragment) {
-        if frag_s < frag_e && frag_e <= raw.len() {
-            let fragment = decode_bytes(&raw[frag_s..frag_e], &encoding);
-            let trimmed = fragment.trim();
-            let wrapped_fragment = if (trimmed.contains("<tr") || trimmed.contains("<td") || trimmed.contains("<col"))
-                && !trimmed.to_lowercase().contains("<table")
-            {
-                format!("<table style=\"border-collapse: collapse; min-width: 100%;\">{}</table>", fragment)
-            } else {
-                repair_html_fragment(&fragment)
-            };
+    // Prefer the full HTML range to preserve document-wide styles (CSS)
+    let (s, e, is_full_doc) = if let (Some(s_h), Some(e_h)) = (start_html, end_html) {
+        (s_h, e_h, true)
+    } else if let (Some(s_f), Some(e_f)) = (start_frag, end_frag) {
+        (s_f, e_f, false)
+    } else {
+        (0, 0, false)
+    };
 
-            if let (Some(html_s), Some(html_e)) = (start_html, end_html) {
-                if html_s < html_e && html_e <= raw.len() {
-                    let mut full_html = decode_bytes(&raw[html_s..html_e], &encoding);
-                    let start_marker = "<!--StartFragment-->";
-                    let end_marker = "<!--EndFragment-->";
-
-                    if let Some(start_idx) = full_html.find(start_marker) {
-                        let after_start = start_idx + start_marker.len();
-                        if let Some(end_rel) = full_html[after_start..].find(end_marker) {
-                            let end_idx = after_start + end_rel;
-                            full_html = format!(
-                                "{}{}{}",
-                                &full_html[..after_start],
-                                wrapped_fragment,
-                                &full_html[end_idx..]
-                            );
-                        }
-                    }
-
-                    return Some(full_html);
+    if s < e {
+        let content = match encoding {
+            HtmlEncoding::Utf8 => {
+                if e <= raw_str.len() {
+                    Some(raw_str[s..e].to_string())
+                } else {
+                    None
                 }
             }
+            HtmlEncoding::Utf16Le => {
+                if e <= raw.len() {
+                    let u16_buf: Vec<u16> = raw[s..e]
+                        .chunks_exact(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                        .collect();
+                    Some(String::from_utf16_lossy(&u16_buf))
+                } else {
+                    None
+                }
+            }
+        };
 
-            return Some(wrapped_fragment);
+        if let Some(c) = content {
+            if is_full_doc {
+                return Some(c);
+            } else {
+                return Some(repair_html_fragment(&c));
+            }
         }
     }
 
-    let raw_text = raw_str.to_string();
-    if let Some(start_idx) = raw_text.find("<!--StartFragment-->") {
-        if let Some(end_idx) = raw_text.find("<!--EndFragment-->") {
-            let fragment = &raw_text[start_idx + "<!--StartFragment-->".len()..end_idx];
-            return Some(repair_html_fragment(fragment));
+    // Fallback search for fragments if offsets failed or produced invalid results
+    let start_marker = "<!--StartFragment-->";
+    let end_marker = "<!--EndFragment-->";
+    if let Some(s_idx) = raw_str.find(start_marker) {
+        let after_s = s_idx + start_marker.len();
+        if let Some(e_idx) = raw_str[after_s..].find(end_marker) {
+            return Some(repair_html_fragment(&raw_str[after_s..after_s + e_idx]));
         }
     }
-    if looks_like_html_fragment(&raw_text) {
-        return Some(repair_html_fragment(&raw_text));
+
+    // Last resort heuristics
+    if raw_str.contains("Version:") {
+        let mut in_header = true;
+        let mut cleaned_lines = Vec::new();
+        for line in raw_str.lines() {
+            let trimmed = line.trim();
+            if in_header {
+                let lower = trimmed.to_ascii_lowercase();
+                let is_header_key = lower.starts_with("version:")
+                    || lower.starts_with("starthtml:")
+                    || lower.starts_with("endhtml:")
+                    || lower.starts_with("startfragment:")
+                    || lower.starts_with("endfragment:")
+                    || lower.starts_with("sourceurl:");
+
+                if is_header_key || trimmed.is_empty() {
+                    continue;
+                }
+                in_header = false;
+            }
+            cleaned_lines.push(line);
+        }
+
+        let cleaned = cleaned_lines.join("\n").trim().to_string();
+        if looks_like_html_fragment_shallow(&cleaned) {
+            return Some(repair_html_fragment(&cleaned));
+        }
+
+        if let Some(first_bracket) = raw_str.find('<') {
+            let potential = &raw_str[first_bracket..];
+            if looks_like_html_fragment_shallow(potential) {
+                return Some(repair_html_fragment(potential));
+            }
+        }
     }
+
+    if looks_like_html_fragment_shallow(&raw_str) {
+        return Some(repair_html_fragment(&raw_str));
+    }
+
     None
 }

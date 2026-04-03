@@ -1,9 +1,9 @@
-use crate::error::{AppResult, AppError};
+use crate::error::{AppError, AppResult};
 
 #[tauri::command]
 pub async fn download_and_install_update(url: String) -> AppResult<()> {
-    use std::process::Command;
     use std::os::windows::process::CommandExt;
+    use std::process::Command;
 
     let temp_dir = std::env::temp_dir();
     let installer_path = temp_dir.join("TieZ_Update_Installer.exe");
@@ -29,6 +29,6 @@ pub async fn download_and_install_update(url: String) -> AppResult<()> {
     Command::new(&installer_path)
         .spawn()
         .map_err(|e| AppError::Internal(format!("Failed to launch installer: {}", e)))?;
-    
+
     Ok(())
 }

@@ -1,14 +1,14 @@
 // Content handler module for opening various content types
-use crate::infrastructure::windows_api::apps::launch_uwp_with_file;
 use crate::database::DbState;
-use crate::infrastructure::repository::settings_repo::SettingsRepository;
-use crate::infrastructure::repository::clipboard_repo::ClipboardRepository;
 use crate::error::AppError;
+use crate::infrastructure::repository::clipboard_repo::ClipboardRepository;
+use crate::infrastructure::repository::settings_repo::SettingsRepository;
+use crate::infrastructure::windows_api::apps::launch_uwp_with_file;
 use base64::{engine::general_purpose, Engine as _};
 use std::io::Read;
-use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+use std::process::Command;
 use tauri::{Emitter, Manager, State};
 
 #[tauri::command]
@@ -68,7 +68,14 @@ pub async fn open_content(
     let file_path_clone = temp_path.clone();
 
     // Launch the file with appropriate application
-    launch_file_with_app(&app_path, &temp_path, &path_str, &content_type, use_direct_path).await?;
+    launch_file_with_app(
+        &app_path,
+        &temp_path,
+        &path_str,
+        &content_type,
+        use_direct_path,
+    )
+    .await?;
 
     // Start background watcher ONLY if we created a temp file
     if !use_direct_path {
@@ -83,19 +90,22 @@ fn get_app_path_for_content_type(
     content_type: &str,
 ) -> Result<Option<String>, AppError> {
     let setting_key = format!("app.{}", content_type);
-    let mut val = state.settings_repo.get(&setting_key)
+    let mut val = state
+        .settings_repo
+        .get(&setting_key)
         .map_err(AppError::from)?
         .filter(|s| !s.trim().is_empty());
 
     // Fallback: If 'code' app is not set, use 'text' app
     if val.is_none() && content_type == "code" {
-        val = state.settings_repo.get("app.text")
+        val = state
+            .settings_repo
+            .get("app.text")
             .map_err(AppError::from)?
             .filter(|s| !s.trim().is_empty());
     }
     Ok(val)
 }
-
 
 async fn handle_url_content(app_path: &Option<String>, content: &str) -> Result<(), AppError> {
     if let Some(app) = app_path {
@@ -124,16 +134,19 @@ async fn handle_url_content(app_path: &Option<String>, content: &str) -> Result<
                 let mut cmd = Command::new("powershell");
                 cmd.args(["-NoProfile", "-Command", &ps_script])
                     .creation_flags(0x08000000);
-                
+
                 match cmd.spawn() {
                     Ok(_) => return Ok(()),
                     Err(e) => {
-                        println!("Failed to launch via powershell: {}, falling back to default", e);
+                        println!(
+                            "Failed to launch via powershell: {}, falling back to default",
+                            e
+                        );
                         return launch_default_handler(content).await;
                     }
                 }
             }
-            
+
             #[cfg(not(target_os = "windows"))]
             {
                 return launch_default_handler(content).await;
@@ -150,12 +163,16 @@ async fn launch_default_handler(content: &str) -> Result<(), AppError> {
         let mut cmd = Command::new("cmd");
         cmd.args(["/C", "start", "", content])
             .creation_flags(0x08000000);
-        cmd.spawn().map_err(|e| AppError::Internal(format!("启动默认浏览器失败: {}", e)))?;
+        cmd.spawn()
+            .map_err(|e| AppError::Internal(format!("启动默认浏览器失败: {}", e)))?;
     }
-    
+
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new("open").arg(content).spawn().map_err(|e| AppError::Internal(format!("启动默认浏览器失败: {}", e)))?;
+        Command::new("open")
+            .arg(content)
+            .spawn()
+            .map_err(|e| AppError::Internal(format!("启动默认浏览器失败: {}", e)))?;
     }
     Ok(())
 }
@@ -185,7 +202,7 @@ fn create_temp_file(
             let is_gif = content.contains("image/gif");
             let extension = if is_gif { "gif" } else { "png" };
             temp_path.push(format!("{}.{}", filename, extension));
-            
+
             let b64_data = if content.starts_with("data:image") {
                 content.split(',').nth(1).unwrap_or(content)
             } else {
@@ -228,7 +245,6 @@ async fn launch_file_with_app(
                 .arg(temp_path)
                 .spawn()
                 .map_err(|e| format!("启动程序失败: {}", e))?;
-
         } else {
             // Check for macOS-style paths on Windows to avoid invalid WinRT/Start-Process calls
             #[cfg(target_os = "windows")]
@@ -236,7 +252,10 @@ async fn launch_file_with_app(
                 return launch_with_default_app(path_str, content_type, use_direct_path);
             }
 
-            println!("Attempting to launch UWP app: {} for file: {}", app, path_str);
+            println!(
+                "Attempting to launch UWP app: {} for file: {}",
+                app, path_str
+            );
             if let Err(e) = launch_uwp_with_file(app, path_str).await {
                 println!("WinRT launch failed: {}, falling back to old method", e);
                 let safe_path = path_str.replace("'", "''");
@@ -253,13 +272,19 @@ async fn launch_file_with_app(
                         Ok(_) => return Ok(()),
                         Err(err) => {
                             println!("Fallback launch failed: {}, using system default", err);
-                            return launch_with_default_app(path_str, content_type, use_direct_path);
+                            return launch_with_default_app(
+                                path_str,
+                                content_type,
+                                use_direct_path,
+                            );
                         }
                     }
                 }
-                
+
                 #[cfg(not(target_os = "windows"))]
-                Command::new("open").arg(safe_path).spawn().map_err(|e| AppError::Internal(format!("启动 UWP 程序失败 (Fallback): {}", e)))?;
+                Command::new("open").arg(safe_path).spawn().map_err(|e| {
+                    AppError::Internal(format!("启动 UWP 程序失败 (Fallback): {}", e))
+                })?;
             }
         }
     } else {
@@ -273,12 +298,11 @@ fn launch_with_default_app(
     _content_type: &str,
     _use_direct_path: bool,
 ) -> Result<(), AppError> {
-
     #[cfg(target_os = "windows")]
     {
+        use windows::core::{HSTRING, PCWSTR};
         use windows::Win32::UI::Shell::ShellExecuteW;
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
-        use windows::core::{HSTRING, PCWSTR};
 
         let operation = HSTRING::from("open");
         let file = HSTRING::from(path_str);
@@ -304,7 +328,10 @@ fn launch_with_default_app(
 
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new("open").arg(path_str).spawn().map_err(|e| AppError::Internal(format!("Failed to open file: {}", e)))?;
+        Command::new("open")
+            .arg(path_str)
+            .spawn()
+            .map_err(|e| AppError::Internal(format!("Failed to open file: {}", e)))?;
     }
 
     Ok(())
@@ -338,9 +365,7 @@ fn start_file_watcher(
                 last_mtime = current_mtime;
                 println!("File changed detected: {:?}", file_path);
 
-                if let Some((new_content, preview)) =
-                    read_changed_file(&file_path, &content_type)
-                {
+                if let Some((new_content, preview)) = read_changed_file(&file_path, &content_type) {
                     update_database_with_changes(&app_handle, id, &new_content, &preview);
                 }
             }
@@ -348,10 +373,7 @@ fn start_file_watcher(
     });
 }
 
-fn read_changed_file(
-    file_path: &std::path::Path,
-    content_type: &str,
-) -> Option<(String, String)> {
+fn read_changed_file(file_path: &std::path::Path, content_type: &str) -> Option<(String, String)> {
     let mut new_content = String::new();
     let success = if content_type == "image" {
         read_image_file(file_path, &mut new_content)
@@ -441,7 +463,10 @@ fn update_database_with_changes(
                     item.content_type = "text".to_string();
                 }
                 let _ = app_handle.emit("clipboard-updated", item.clone());
-                println!("Session item updated and clipboard-updated event emitted for id: {}", id);
+                println!(
+                    "Session item updated and clipboard-updated event emitted for id: {}",
+                    id
+                );
                 return;
             }
         }
@@ -451,7 +476,11 @@ fn update_database_with_changes(
 
     let state = app_handle.state::<DbState>();
 
-    if state.repo.update_entry_content(id, new_content, preview).is_ok() {
+    if state
+        .repo
+        .update_entry_content(id, new_content, preview)
+        .is_ok()
+    {
         if let Some(session) = app_handle.try_state::<SessionHistory>() {
             let mut history = session.0.lock().unwrap();
             if let Some(item) = history.iter_mut().find(|i| i.id == id) {
@@ -466,7 +495,10 @@ fn update_database_with_changes(
 
         if let Ok(Some(updated_entry)) = state.repo.get_entry_by_id(id) {
             let _ = app_handle.emit("clipboard-updated", updated_entry);
-            println!("Database updated and clipboard-updated event emitted for id: {}", id);
+            println!(
+                "Database updated and clipboard-updated event emitted for id: {}",
+                id
+            );
         } else {
             let _ = app_handle.emit("clipboard-changed", id);
             println!("Database updated for id: {}", id);

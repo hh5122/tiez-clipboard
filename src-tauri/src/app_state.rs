@@ -1,8 +1,8 @@
+use crate::domain::models::ClipboardEntry;
+use crate::services::encryption_queue::EncryptionQueue;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
-use crate::domain::models::ClipboardEntry;
-use crate::services::encryption_queue::EncryptionQueue;
 
 pub struct SettingsState {
     pub deduplicate: AtomicBool,

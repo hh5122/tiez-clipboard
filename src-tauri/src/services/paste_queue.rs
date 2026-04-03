@@ -1,9 +1,9 @@
-use crate::app_state::{PasteQueue, SessionHistory, AppDataDir};
+use crate::app_state::{AppDataDir, PasteQueue, SessionHistory};
 use crate::database::DbState;
+use crate::error::AppResult;
 use crate::infrastructure::repository::clipboard_repo::ClipboardRepository;
 use crate::infrastructure::repository::settings_repo::SettingsRepository;
 use tauri::{Emitter, Manager, State};
-use crate::error::AppResult;
 
 #[allow(dead_code)]
 const WM_PASTE: u32 = 0x0302;
@@ -91,11 +91,18 @@ pub async fn paste_next_step(app_handle: tauri::AppHandle) {
         // 2. Get Content (DB Lock acquired here, safe because Queue lock is released)
         let content_opt = if id < 0 {
             let s = session.inner().0.lock().unwrap();
-            s.iter()
-                .find(|i| i.id == id)
-                .map(|i| (i.content.clone(), i.content_type.clone(), i.html_content.clone()))
+            s.iter().find(|i| i.id == id).map(|i| {
+                (
+                    i.content.clone(),
+                    i.content_type.clone(),
+                    i.html_content.clone(),
+                )
+            })
         } else {
-            db_state.repo.get_entry_content_with_html(id).unwrap_or(None)
+            db_state
+                .repo
+                .get_entry_content_with_html(id)
+                .unwrap_or(None)
         };
 
         if let Some((content, c_type, html_content)) = content_opt {
@@ -114,15 +121,22 @@ pub async fn paste_next_step(app_handle: tauri::AppHandle) {
             )
             .await
             {
-                eprintln!("[ERROR] Failed to prepare clipboard payload for sequential paste: {err}");
+                eprintln!(
+                    "[ERROR] Failed to prepare clipboard payload for sequential paste: {err}"
+                );
                 let _ = app_handle.emit("queue-item-pasted", id);
                 return;
             }
 
             // Get paste method from settings
             let paste_method = {
-                let db_state = app_handle.state::<DbState>(); 
-                db_state.settings_repo.get("app.paste_method").ok().flatten().unwrap_or_else(|| "shift_insert".to_string())
+                let db_state = app_handle.state::<DbState>();
+                db_state
+                    .settings_repo
+                    .get("app.paste_method")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "shift_insert".to_string())
             };
 
             // Send paste keystroke using centralized logic
@@ -139,7 +153,7 @@ pub async fn paste_next_step(app_handle: tauri::AppHandle) {
             crate::services::clipboard_ops::send_paste_keystroke(
                 &paste_method,
                 Some(&content),
-                Some(&c_type)
+                Some(&c_type),
             );
 
             // Settle time
@@ -151,14 +165,17 @@ pub async fn paste_next_step(app_handle: tauri::AppHandle) {
                 #[cfg(target_os = "windows")]
                 unsafe {
                     use windows::Win32::UI::Input::KeyboardAndMouse::{
-                        VK_MENU, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+                        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, VK_MENU,
                     };
                     let alt_restore = INPUT {
                         r#type: INPUT_KEYBOARD,
                         Anonymous: INPUT_0 {
                             ki: KEYBDINPUT {
                                 wVk: VK_MENU,
-                                dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0),
+                                dwFlags:
+                                    windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(
+                                        0,
+                                    ),
                                 ..Default::default()
                             },
                         },
@@ -171,7 +188,9 @@ pub async fn paste_next_step(app_handle: tauri::AppHandle) {
             // Perform deletion if delete_after_paste is enabled
             let delete_after_paste = {
                 let settings_state = app_handle.state::<crate::app_state::SettingsState>();
-                settings_state.delete_after_paste.load(std::sync::atomic::Ordering::Relaxed)
+                settings_state
+                    .delete_after_paste
+                    .load(std::sync::atomic::Ordering::Relaxed)
             };
 
             if delete_after_paste {

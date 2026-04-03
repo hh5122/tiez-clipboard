@@ -41,6 +41,9 @@ import { getSourceAppIcon, peekSourceAppIcon } from "../../../shared/lib/sourceA
 const COMPACT_PREVIEW_LABEL = "compact-preview";
 const RICH_IMAGE_FALLBACK_PREFIX = "<!--TIEZ_RICH_IMAGE:";
 const RICH_IMAGE_FALLBACK_SUFFIX = "-->";
+const TABULAR_RICH_HTML_RE = /<(table|tr|td|th|thead|tbody|tfoot|colgroup|col)\b/i;
+const SPREADSHEET_SOURCE_RE = /\b(excel|et|wps|sheet|spreadsheet|calc)\b/i;
+const SPREADSHEET_EXECUTABLE_RE = /(?:^|[\\/])(excel|et|wps|wpssheet|soffice)\.exe$/i;
 const COMPACT_PREVIEW_DEBUG = false;
 const RICH_PREVIEW_DEBUG = import.meta.env.DEV;
 const compactPreviewLog = (...args: unknown[]) => {
@@ -84,6 +87,25 @@ const resolveRichImageSrc = (payload?: string): string | null => {
     if (value.startsWith("data:image/")) return value;
     if (/^https?:\/\/asset\.localhost\//i.test(value)) return value;
     return toTauriLocalImageSrc(value);
+};
+
+const isAnimatedGifSrc = (src?: string | null): boolean => {
+    const value = (src || "").trim().toLowerCase();
+    if (!value) return false;
+    return value.startsWith("data:image/gif") || /\.gif(?:$|[?#])/i.test(value);
+};
+
+const richHtmlLooksTabular = (html?: string): boolean => {
+    if (!html) return false;
+    return TABULAR_RICH_HTML_RE.test(html);
+};
+
+const isSpreadsheetLikeSource = (...candidates: Array<string | undefined>): boolean => {
+    return candidates.some((candidate) => {
+        const value = (candidate || "").trim();
+        if (!value) return false;
+        return SPREADSHEET_EXECUTABLE_RE.test(value) || SPREADSHEET_SOURCE_RE.test(value);
+    });
 };
 
 let compactPreviewWindow: WebviewWindow | null = null;
@@ -657,6 +679,7 @@ const ClipboardItem = ({
             const { cleanHtml, imagePayload } = extractRichImageFallback(item.html_content);
             return {
                 cleanHtml: cleanHtml || item.html_content,
+                imagePayload,
                 imageSrc: resolveRichImageSrc(imagePayload)
             };
         })()
@@ -665,8 +688,18 @@ const ClipboardItem = ({
     const richTextSnapshotDisplayMaxHeight = compactMode ? 40 : 64;
     const richTextSnapshotRenderMaxHeight = compactMode ? 100 : 200;
     const canShowCompactPreview = compactMode && item.content_type !== "file";
+    const spreadsheetLikeRichSource = item.content_type === "rich_text"
+        && !!item.html_content
+        && isSpreadsheetLikeSource(item.source_app, item.source_app_path);
+    const preferGeneratedRichPreview = item.content_type === "rich_text"
+        && !!item.html_content
+        && (
+            !!richTextSnapshotPreview
+            || richHtmlLooksTabular(richTextCleanHtml)
+            || spreadsheetLikeRichSource
+        );
     const richTextSnapshotSrc = useMemo(() => {
-        if (!richTextSnapshotPreview) return null;
+        if (!preferGeneratedRichPreview) return null;
         if (item.content_type !== "rich_text" || !item.html_content) return null;
         if (!richTextCleanHtml) return null;
         return getRichTextSnapshotDataUrl(richTextCleanHtml, {
@@ -675,20 +708,24 @@ const ClipboardItem = ({
             maxHeight: richTextSnapshotRenderMaxHeight
         });
     }, [
-        richTextSnapshotPreview,
+        preferGeneratedRichPreview,
         item.content_type,
         item.html_content,
         richTextCleanHtml,
         compactMode,
         richTextSnapshotRenderMaxHeight
     ]);
-    const snapshotPreviewEnabled = !!richTextSnapshotPreview;
-    const effectiveRichTextSnapshotSrc = snapshotPreviewEnabled && !snapshotFailed ? richTextSnapshotSrc : null;
-    const useRichImageFallback = snapshotPreviewEnabled && !richImageFallbackFailed && !!richTextFallback?.imageSrc;
-    const richTextPreviewSrc = useRichImageFallback
+    const effectiveRichTextSnapshotSrc = !snapshotFailed ? richTextSnapshotSrc : null;
+    const effectiveRichImageFallbackSrc = !richImageFallbackFailed
         ? (richTextFallback?.imageSrc || null)
-        : effectiveRichTextSnapshotSrc;
-    const useSnapshotPreviewImage = snapshotPreviewEnabled && !useRichImageFallback && !!effectiveRichTextSnapshotSrc;
+        : null;
+    const richTextPreviewSrc = isAnimatedGifSrc(
+        richTextFallback?.imagePayload || effectiveRichImageFallbackSrc
+    )
+        ? (effectiveRichImageFallbackSrc || effectiveRichTextSnapshotSrc)
+        : (effectiveRichTextSnapshotSrc || effectiveRichImageFallbackSrc);
+    const useSnapshotPreviewImage = !!richTextPreviewSrc && richTextPreviewSrc === effectiveRichTextSnapshotSrc;
+    const useRichImageFallback = !!richTextPreviewSrc && richTextPreviewSrc === effectiveRichImageFallbackSrc;
     const visibleTagCount = item.tags?.length || 0;
     const hasTagsSection = visibleTagCount > 0 || isEditingTags;
     const overlayTagsInPreview = !compactMode && !isEditingTags && visibleTagCount > 0;

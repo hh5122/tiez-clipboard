@@ -2,11 +2,12 @@ import { toTauriLocalImageSrc } from "./localImageSrc";
 import {
   isHtmlishTagText,
   isOfficeStyleDefinitionText,
+  repairHtmlFragment,
   stripOfficePreviewNoise
 } from "./repairHtmlFragment";
 
 const SNAPSHOT_CACHE_LIMIT = 240;
-const SNAPSHOT_CACHE_VERSION = "v4";
+const SNAPSHOT_CACHE_VERSION = "v6";
 const snapshotCache = new Map<string, string>();
 
 const RICH_IMAGE_FALLBACK_PREFIX = "<!--TIEZ_RICH_IMAGE:";
@@ -48,6 +49,7 @@ type SnapshotOptions = {
 type SnapshotFailureReason =
   | "empty_html"
   | "normalize_failed"
+  | "tabular_render_failed"
   | "contains_external_images"
   | "contains_non_data_images"
   | "data_url_too_large"
@@ -270,6 +272,406 @@ const stripInvalidXmlChars = (input: string): string => {
   return out;
 };
 
+const escapeXmlText = (input: string): string =>
+  stripInvalidXmlChars(input)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+
+const svgDataUrlFromMarkup = (svg: string): string =>
+  `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+
+type TabularCellSnapshot = {
+  text: string;
+  colspan: number;
+  align: "left" | "center" | "right";
+  background: string;
+  color: string;
+  bold: boolean;
+};
+
+type TabularSnapshot = {
+  rows: TabularCellSnapshot[][];
+  columnCount: number;
+};
+
+type ResolvedTabularStyle = {
+  background?: string;
+  color?: string;
+  textAlign?: "left" | "center" | "right";
+  bold?: boolean;
+};
+
+const TABULAR_TABLE_RE = /<(table|tr|td|th)\b/i;
+const CLASS_NAME_RE = /\.([_a-zA-Z][-_a-zA-Z0-9]*)/g;
+
+const normalizeCssColor = (value: string | null | undefined): string | null => {
+  const raw = (value || "").trim();
+  if (!raw) return null;
+  if (/^(transparent|inherit|initial|unset|auto|none)$/i.test(raw)) return null;
+  if (/url\(|gradient\(|var\(/i.test(raw)) return null;
+  if (!/^(#[0-9a-f]{3,8}|rgba?\([^)]+\)|hsla?\([^)]+\)|[a-z]+)$/i.test(raw)) {
+    return null;
+  }
+  return raw;
+};
+
+const readStyleProperty = (styleText: string, propertyName: string): string | null => {
+  const match = styleText.match(
+    new RegExp(`${propertyName}\\s*:\\s*([^;]+)`, "i")
+  );
+  const value = match?.[1]?.trim();
+  return value || null;
+};
+
+const readColorStyleProperty = (styleText: string, propertyName: string): string | null =>
+  normalizeCssColor(readStyleProperty(styleText, propertyName));
+
+const parseTextAlign = (value?: string | null): "left" | "center" | "right" | undefined => {
+  const normalized = (value || "").trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (normalized === "center") return "center";
+  if (normalized === "right" || normalized === "end") return "right";
+  if (normalized === "left" || normalized === "start") return "left";
+  return undefined;
+};
+
+const parseBold = (value?: string | null): boolean | undefined => {
+  const normalized = (value || "").trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (normalized === "bold") return true;
+  const weight = Number.parseInt(normalized, 10);
+  if (Number.isFinite(weight)) {
+    return weight >= 600;
+  }
+  return undefined;
+};
+
+const mergeResolvedTabularStyle = (
+  base: ResolvedTabularStyle | undefined,
+  patch: ResolvedTabularStyle
+): ResolvedTabularStyle => ({
+  background: patch.background ?? base?.background,
+  color: patch.color ?? base?.color,
+  textAlign: patch.textAlign ?? base?.textAlign,
+  bold: patch.bold ?? base?.bold,
+});
+
+const parseResolvedTabularStyle = (styleText: string): ResolvedTabularStyle => ({
+  background:
+    readColorStyleProperty(styleText, "background-color") ||
+    readColorStyleProperty(styleText, "background") ||
+    undefined,
+  color: readColorStyleProperty(styleText, "color") || undefined,
+  textAlign: parseTextAlign(readStyleProperty(styleText, "text-align")),
+  bold: parseBold(readStyleProperty(styleText, "font-weight")),
+});
+
+const sanitizeStyleBlockText = (styleText: string): string =>
+  (styleText || "")
+    .replace(/<!--|-->/g, " ")
+    .replace(/<!\[CDATA\[|\]\]>/g, " ")
+    .replace(/\/\*[\s\S]*?\*\//g, " ");
+
+const extractTabularClassStyles = (html: string): Map<string, ResolvedTabularStyle> => {
+  const source = repairHtmlFragment(stripRichImageFallbackMarker((html || "").trim()));
+  if (!source) return new Map();
+
+  const doc = new DOMParser().parseFromString(source, "text/html");
+  const classStyles = new Map<string, ResolvedTabularStyle>();
+
+  for (const styleEl of Array.from(doc.querySelectorAll("style"))) {
+    const cssText = sanitizeStyleBlockText(styleEl.textContent || "");
+    const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
+    let match: RegExpExecArray | null = null;
+
+    while ((match = ruleRe.exec(cssText)) !== null) {
+      const selectors = match[1]
+        .split(",")
+        .map((selector) => selector.trim())
+        .filter(Boolean);
+      const style = parseResolvedTabularStyle(match[2] || "");
+      if (!style.background && !style.color && !style.textAlign && style.bold === undefined) {
+        continue;
+      }
+
+      for (const selector of selectors) {
+        if (selector.includes(":")) continue;
+
+        let classMatch: RegExpExecArray | null = null;
+        while ((classMatch = CLASS_NAME_RE.exec(selector)) !== null) {
+          const className = classMatch[1];
+          if (!className) continue;
+          classStyles.set(
+            className,
+            mergeResolvedTabularStyle(classStyles.get(className), style)
+          );
+        }
+        CLASS_NAME_RE.lastIndex = 0;
+      }
+    }
+  }
+
+  return classStyles;
+};
+
+const resolveElementClassStyle = (
+  element: Element | null,
+  classStyles?: Map<string, ResolvedTabularStyle>
+): ResolvedTabularStyle | undefined => {
+  if (!element || !classStyles || classStyles.size === 0) return undefined;
+
+  const classNames = (element.getAttribute("class") || "")
+    .split(/\s+/)
+    .map((name) => name.trim())
+    .filter(Boolean);
+
+  return classNames.reduce<ResolvedTabularStyle | undefined>((acc, className) => {
+    const style = classStyles.get(className);
+    return style ? mergeResolvedTabularStyle(acc, style) : acc;
+  }, undefined);
+};
+
+const resolveElementStyle = (
+  element: Element | null,
+  classStyles?: Map<string, ResolvedTabularStyle>
+): ResolvedTabularStyle | undefined => {
+  if (!element) return undefined;
+
+  const classStyle = resolveElementClassStyle(element, classStyles);
+  const inlineStyle = parseResolvedTabularStyle(element.getAttribute("style") || "");
+  if (!classStyle) {
+    if (!inlineStyle.background && !inlineStyle.color && !inlineStyle.textAlign && inlineStyle.bold === undefined) {
+      return undefined;
+    }
+    return inlineStyle;
+  }
+  return mergeResolvedTabularStyle(classStyle, inlineStyle);
+};
+
+const resolveCellAlign = (styleText: string, cell: Element): "left" | "center" | "right" => {
+  const attr = (cell.getAttribute("align") || "").trim().toLowerCase();
+  return parseTextAlign(readStyleProperty(styleText, "text-align")) || parseTextAlign(attr) || "left";
+};
+
+const truncateCellText = (text: string, pixelWidth: number): string => {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (!compact) return " ";
+  const maxChars = Math.max(1, Math.floor((pixelWidth - 16) / 7));
+  if (compact.length <= maxChars) return compact;
+  if (maxChars <= 1) return "…";
+  return `${compact.slice(0, maxChars - 1)}…`;
+};
+
+const collectTabularSnapshot = (
+  html: string,
+  maxRows: number,
+  maxCols: number,
+  classStyles?: Map<string, ResolvedTabularStyle>
+): TabularSnapshot | null => {
+  if (!TABULAR_TABLE_RE.test(html)) return null;
+
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const table = doc.querySelector("table");
+  if (!table) return null;
+  const tableStyle = resolveElementStyle(table, classStyles);
+  const columnStyles: Array<ResolvedTabularStyle | undefined> = [];
+  let columnCursor = 0;
+
+  for (const col of Array.from(table.querySelectorAll("col"))) {
+    const spanRaw = Number.parseInt(col.getAttribute("span") || "1", 10);
+    const span = Math.max(1, Number.isFinite(spanRaw) ? spanRaw : 1);
+    const colStyle = resolveElementStyle(col, classStyles);
+    for (let i = 0; i < span; i++) {
+      columnStyles[columnCursor++] = mergeResolvedTabularStyle(tableStyle, colStyle || {});
+    }
+  }
+
+  const rows: TabularCellSnapshot[][] = [];
+  let columnCount = 0;
+
+  for (const rowEl of Array.from(table.querySelectorAll("tr")).slice(0, maxRows)) {
+    const cells = Array.from(rowEl.children).filter((cell) =>
+      /^(td|th)$/i.test(cell.tagName)
+    );
+    if (!cells.length) continue;
+
+    let usedColumns = 0;
+    const row: TabularCellSnapshot[] = [];
+    const rowStyle = mergeResolvedTabularStyle(
+      tableStyle,
+      resolveElementStyle(rowEl, classStyles) || {}
+    );
+
+    for (const cell of cells) {
+      if (usedColumns >= maxCols) break;
+
+      const colspanRaw = Number.parseInt(cell.getAttribute("colspan") || "1", 10);
+      const colspan = Math.max(
+        1,
+        Math.min(Number.isFinite(colspanRaw) ? colspanRaw : 1, maxCols - usedColumns)
+      );
+      const styleText = cell.getAttribute("style") || "";
+      const columnStyle = columnStyles[usedColumns];
+      const cellStyle = mergeResolvedTabularStyle(
+        mergeResolvedTabularStyle(rowStyle, columnStyle || {}),
+        resolveElementStyle(cell, classStyles) || {}
+      );
+      const text = (cell.textContent || "").replace(/\s+/g, " ").trim();
+
+      row.push({
+        text: text || " ",
+        colspan,
+        align: cellStyle?.textAlign || resolveCellAlign(styleText, cell) || "left",
+        background:
+          normalizeCssColor(cell.getAttribute("bgcolor")) ||
+          readColorStyleProperty(styleText, "background-color") ||
+          readColorStyleProperty(styleText, "background") ||
+          cellStyle?.background ||
+          (cell.tagName.toLowerCase() === "th" ? "#dbe8ff" : "#ffffff"),
+        color:
+          normalizeCssColor(cell.getAttribute("color")) ||
+          readColorStyleProperty(styleText, "color") ||
+          cellStyle?.color ||
+          (cell.tagName.toLowerCase() === "th" ? "#22406f" : "#303846"),
+        bold:
+          cell.tagName.toLowerCase() === "th" ||
+          /font-weight\s*:\s*(bold|[6-9]00)/i.test(styleText) ||
+          !!cellStyle?.bold,
+      });
+      usedColumns += colspan;
+    }
+
+    if (!row.length) continue;
+    columnCount = Math.max(columnCount, usedColumns);
+    rows.push(row);
+  }
+
+  if (!rows.length || columnCount <= 0) return null;
+  return {
+    rows,
+    columnCount,
+  };
+};
+
+const buildTabularSnapshotSvg = (
+  snapshot: TabularSnapshot,
+  width: number,
+  maxHeight: number
+): string | null => {
+  const outerPadding = 1;
+  const rowHeight = 28;
+  const visibleRowCount = Math.max(
+    1,
+    Math.min(snapshot.rows.length, Math.floor((maxHeight - outerPadding * 2) / rowHeight))
+  );
+  const rows = snapshot.rows.slice(0, visibleRowCount);
+  if (!rows.length) return null;
+
+  const gridWidth = Math.max(160, width - outerPadding * 2);
+  const weights = Array.from({ length: snapshot.columnCount }, () => 1);
+
+  for (const row of rows) {
+    let colIndex = 0;
+    for (const cell of row) {
+      const estimatedWeight = Math.max(1, Math.min(3.2, cell.text.trim().length / 5 + 0.9));
+      for (let i = 0; i < cell.colspan && colIndex + i < weights.length; i++) {
+        weights[colIndex + i] = Math.max(
+          weights[colIndex + i],
+          estimatedWeight / Math.max(1, cell.colspan)
+        );
+      }
+      colIndex += cell.colspan;
+    }
+  }
+
+  const desiredWidths = weights.map((weight) => Math.max(56, weight * 54));
+  const widthScale = gridWidth / desiredWidths.reduce((sum, current) => sum + current, 0);
+  const columnWidths = desiredWidths.map((current) => Math.max(30, current * widthScale));
+  const accumulatedWidth = columnWidths.reduce((sum, current) => sum + current, 0);
+  if (columnWidths.length > 0) {
+    columnWidths[columnWidths.length - 1] += gridWidth - accumulatedWidth;
+  }
+
+  const colOffsets: number[] = [];
+  let runningX = outerPadding;
+  for (const colWidth of columnWidths) {
+    colOffsets.push(runningX);
+    runningX += colWidth;
+  }
+
+  const height = rows.length * rowHeight + outerPadding * 2;
+  const parts: string[] = [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+    `<rect x="0.5" y="0.5" width="${Math.max(1, width - 1)}" height="${Math.max(
+      1,
+      height - 1
+    )}" rx="4" ry="4" fill="#ffffff" stroke="#cfd6df" />`,
+  ];
+
+  rows.forEach((row, rowIndex) => {
+    const y = outerPadding + rowIndex * rowHeight;
+    let colIndex = 0;
+
+    row.forEach((cell) => {
+      if (colIndex >= columnWidths.length) return;
+      const x = colOffsets[colIndex];
+      const cellWidth = columnWidths
+        .slice(colIndex, colIndex + cell.colspan)
+        .reduce((sum, current) => sum + current, 0);
+
+      parts.push(
+        `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${Math.max(
+          1,
+          cellWidth
+        ).toFixed(2)}" height="${rowHeight.toFixed(
+          2
+        )}" fill="${escapeXmlText(cell.background)}" stroke="#cfd6df" />`
+      );
+
+      const text = escapeXmlText(truncateCellText(cell.text, cellWidth));
+      const anchor =
+        cell.align === "center" ? "middle" : cell.align === "right" ? "end" : "start";
+      const textX =
+        cell.align === "center"
+          ? x + cellWidth / 2
+          : cell.align === "right"
+          ? x + cellWidth - 8
+          : x + 8;
+
+      parts.push(
+        `<text x="${textX.toFixed(2)}" y="${(y + rowHeight / 2 + 0.5).toFixed(
+          2
+        )}" fill="${escapeXmlText(cell.color)}" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="12" font-weight="${
+          cell.bold ? 600 : 400
+        }" dominant-baseline="middle" text-anchor="${anchor}">${text}</text>`
+      );
+
+      colIndex += cell.colspan;
+    });
+  });
+
+  parts.push("</svg>");
+  return parts.join("");
+};
+
+const tryBuildTabularSnapshotDataUrl = (
+  html: string,
+  originalHtml: string,
+  width: number,
+  maxHeight: number
+): string | null => {
+  const classStyles = extractTabularClassStyles(originalHtml);
+  const snapshot = collectTabularSnapshot(html, 18, 10, classStyles);
+  if (!snapshot) return null;
+
+  const svg = buildTabularSnapshotSvg(snapshot, width, maxHeight);
+  if (!svg) return null;
+  return svgDataUrlFromMarkup(svg);
+};
+
 const toBase64Utf8 = (input: string): string => {
   const bytes = new TextEncoder().encode(input);
   let binary = "";
@@ -322,6 +724,18 @@ export const getRichTextSnapshotDataUrl = (
         maxHeight
       });
       return null;
+    }
+
+    const tabularDataUrl = tryBuildTabularSnapshotDataUrl(
+      normalized.bodyHtml,
+      sourceHtml,
+      width,
+      maxHeight
+    );
+    if (tabularDataUrl) {
+      snapshotCache.set(key, tabularDataUrl);
+      trimCache();
+      return tabularDataUrl;
     }
 
     const nonDataImageCount =

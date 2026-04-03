@@ -1,13 +1,11 @@
+use crate::app::commands::file_cmd::{
+    image_ext_from_mime, list_emoji_favorite_paths_in_dir, save_emoji_favorite_bytes_to_dir,
+};
 use crate::database::DbState;
 use crate::domain::models::ClipboardEntry;
 use crate::error::{AppError, AppResult};
 use crate::infrastructure::repository::clipboard_repo::ClipboardRepository;
 use crate::infrastructure::repository::settings_repo::SettingsRepository;
-use crate::app::commands::file_cmd::{
-    image_ext_from_mime,
-    list_emoji_favorite_paths_in_dir,
-    save_emoji_favorite_bytes_to_dir,
-};
 use base64::Engine;
 use regex::Regex;
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
@@ -249,7 +247,9 @@ fn active_sync_status_snapshot() -> CloudSyncStatus {
 }
 
 fn parse_interval_secs(raw: Option<String>) -> u64 {
-    let parsed = raw.and_then(|v| v.parse::<u64>().ok()).unwrap_or(DEFAULT_INTERVAL_SECS);
+    let parsed = raw
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_INTERVAL_SECS);
     parsed.clamp(MIN_INTERVAL_SECS, MAX_INTERVAL_SECS)
 }
 
@@ -418,11 +418,13 @@ fn get_config(app: &AppHandle) -> Option<CloudSyncConfig> {
 }
 
 fn is_syncable_content_type(content_type: &str) -> bool {
-    matches!(content_type, "text" | "code" | "url" | "rich_text" | "image" | "emoji_sync")
+    matches!(
+        content_type,
+        "text" | "code" | "url" | "rich_text" | "image" | "emoji_sync"
+    )
 }
 
 fn is_setting_sync_eligible(key: &str) -> bool {
-
     !matches!(
         key,
         "app.anon_id"
@@ -549,7 +551,9 @@ fn decode_data_url(data_url: &str) -> AppResult<(&str, Vec<u8>)> {
         return Err(AppError::Validation("invalid data url payload".to_string()));
     };
     if !meta.contains(";base64") {
-        return Err(AppError::Validation("unsupported data url encoding".to_string()));
+        return Err(AppError::Validation(
+            "unsupported data url encoding".to_string(),
+        ));
     }
     let mime = meta.split(';').next().unwrap_or("").trim();
     if mime.is_empty() {
@@ -582,8 +586,9 @@ fn decode_emoji_favorites_setting(app: &AppHandle, raw: &str) -> AppResult<Strin
         if bytes.is_empty() || bytes.len() > MAX_INLINE_IMAGE_BYTES {
             continue;
         }
-        let ext = image_ext_from_mime(mime)
-            .ok_or_else(|| AppError::Validation(format!("unsupported emoji mime type: {}", mime)))?;
+        let ext = image_ext_from_mime(mime).ok_or_else(|| {
+            AppError::Validation(format!("unsupported emoji mime type: {}", mime))
+        })?;
         let path = save_emoji_favorite_bytes_to_dir(&data_dir, &bytes, ext)?;
         saved_paths.push(path);
     }
@@ -687,7 +692,12 @@ fn blob_cache_storage_key(cfg: &CloudSyncConfig, relative_path: &str) -> String 
 fn load_webdav_blob_cache(app: &AppHandle) -> HashMap<String, i64> {
     let raw = app
         .try_state::<DbState>()
-        .and_then(|db| db.settings_repo.get(CLOUD_SYNC_WEBDAV_BLOB_CACHE_KEY).ok().flatten())
+        .and_then(|db| {
+            db.settings_repo
+                .get(CLOUD_SYNC_WEBDAV_BLOB_CACHE_KEY)
+                .ok()
+                .flatten()
+        })
         .unwrap_or_default();
     if raw.trim().is_empty() {
         return HashMap::new();
@@ -808,7 +818,9 @@ fn load_local_sync_index(app: &AppHandle) -> AppResult<HashMap<String, String>> 
         .prepare("SELECT sync_key, digest FROM cloud_sync_local_index")
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let mut index = HashMap::new();
@@ -894,7 +906,12 @@ fn set_local_webdav_op_seq(app: &AppHandle, seq: i64) {
 fn load_webdav_op_cursor_map(app: &AppHandle) -> HashMap<String, i64> {
     let raw = app
         .try_state::<DbState>()
-        .and_then(|db| db.settings_repo.get(CLOUD_SYNC_WEBDAV_OP_CURSOR_MAP_KEY).ok().flatten())
+        .and_then(|db| {
+            db.settings_repo
+                .get(CLOUD_SYNC_WEBDAV_OP_CURSOR_MAP_KEY)
+                .ok()
+                .flatten()
+        })
         .unwrap_or_default();
     if raw.trim().is_empty() {
         return HashMap::new();
@@ -1142,13 +1159,8 @@ fn apply_remote_changes(app: &AppHandle, remote_items: &[CloudSyncItem]) -> AppR
             } else {
                 item.preview.clone()
             };
-            let updated = update_existing_entry_from_sync(
-                &conn,
-                id,
-                item,
-                effective_timestamp,
-                &preview,
-            )?;
+            let updated =
+                update_existing_entry_from_sync(&conn, id, item, effective_timestamp, &preview)?;
             if remote_hash != 0 {
                 let _ = conn.execute(
                     "DELETE FROM cloud_sync_tombstones
@@ -1230,8 +1242,7 @@ fn update_existing_entry_from_sync(
         )
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let incoming_tags_json =
-        serde_json::to_string(&item.tags).unwrap_or_else(|_| "[]".to_string());
+    let incoming_tags_json = serde_json::to_string(&item.tags).unwrap_or_else(|_| "[]".to_string());
     let next_timestamp = current.0.max(effective_timestamp);
     let next_source_app_path = if current.2 == item.source_app {
         current.7.clone()
@@ -1387,8 +1398,7 @@ async fn move_webdav_resource(
     let from_url = webdav_url_for(cfg, from_relative);
     let destination = webdav_url_for(cfg, to_relative);
     let resp = webdav_send_with_retry(|| {
-        let method = Method::from_bytes(b"MOVE")
-            .expect("MOVE is a valid HTTP method");
+        let method = Method::from_bytes(b"MOVE").expect("MOVE is a valid HTTP method");
         webdav_with_auth(
             client
                 .request(method, &from_url)
@@ -1633,9 +1643,8 @@ async fn prepare_webdav_items_for_upload(
 ) -> AppResult<Vec<CloudSyncItem>> {
     let mut prepared = Vec::with_capacity(items.len());
     for item in items {
-        prepared.push(
-            prepare_webdav_item_for_upload(app, client, cfg, paths, item, blob_cache).await?,
-        );
+        prepared
+            .push(prepare_webdav_item_for_upload(app, client, cfg, paths, item, blob_cache).await?);
     }
     Ok(prepared)
 }
@@ -1662,7 +1671,9 @@ async fn resolve_webdav_items_with_blobs(
                     let relative = webdav_blob_relative_path(blobs_path, blob_kind, blob_hash);
                     let fetched = fetch_webdav_blob_text(client, cfg, &relative)
                         .await?
-                        .ok_or_else(|| AppError::Network(format!("missing remote content blob: {}", blob_hash)))?;
+                        .ok_or_else(|| {
+                            AppError::Network(format!("missing remote content blob: {}", blob_hash))
+                        })?;
                     blob_cache.insert(cache_key.clone(), fetched.clone());
                     fetched
                 };
@@ -1679,7 +1690,9 @@ async fn resolve_webdav_items_with_blobs(
                     let relative = webdav_blob_relative_path(blobs_path, "html", blob_hash);
                     let fetched = fetch_webdav_blob_text(client, cfg, &relative)
                         .await?
-                        .ok_or_else(|| AppError::Network(format!("missing remote html blob: {}", blob_hash)))?;
+                        .ok_or_else(|| {
+                            AppError::Network(format!("missing remote html blob: {}", blob_hash))
+                        })?;
                     blob_cache.insert(cache_key.clone(), fetched.clone());
                     fetched
                 };
@@ -1730,12 +1743,7 @@ where
             {
                 sleep(webdav_retry_delay(attempt)).await;
             }
-            Err(err) => {
-                return Err(AppError::Network(format!(
-                    "{}: {}",
-                    parse_error_label, err
-                )))
-            }
+            Err(err) => return Err(AppError::Network(format!("{}: {}", parse_error_label, err))),
         }
     }
 
@@ -1805,8 +1813,7 @@ async fn webdav_collection_exists(
     let method = Method::from_bytes(b"PROPFIND")
         .map_err(|e| AppError::Internal(format!("invalid PROPFIND method: {}", e)))?;
     let url = webdav_collection_url_for(cfg, relative_path);
-    let request_body =
-        r#"<?xml version="1.0" encoding="utf-8" ?>
+    let request_body = r#"<?xml version="1.0" encoding="utf-8" ?>
 <d:propfind xmlns:d="DAV:">
   <d:prop>
     <d:resourcetype />
@@ -1869,7 +1876,10 @@ async fn mkcol_if_needed(
     )))
 }
 
-async fn ensure_webdav_directories(client: &Client, cfg: &CloudSyncConfig) -> AppResult<WebDavPaths> {
+async fn ensure_webdav_directories(
+    client: &Client,
+    cfg: &CloudSyncConfig,
+) -> AppResult<WebDavPaths> {
     let base = normalize_webdav_base_path(&cfg.webdav_base_path);
     let mut current = String::new();
 
@@ -1974,7 +1984,11 @@ async fn upload_webdav_snapshot(
     let body = serde_json::to_vec(&snapshot)
         .map_err(|e| AppError::Internal(format!("serialize snapshot failed: {}", e)))?;
 
-    let relative = format!("{}/{}.json", devices_path.trim_end_matches('/'), cfg.device_id);
+    let relative = format!(
+        "{}/{}.json",
+        devices_path.trim_end_matches('/'),
+        cfg.device_id
+    );
     upload_webdav_json_resource(client, cfg, &relative, body, "snapshot").await
 }
 
@@ -2104,7 +2118,8 @@ fn parse_webdav_op_refs(xml: &str) -> Vec<WebDavOpRef> {
         };
         let device_id = device_id_match.as_str().to_string();
         let dedup_key = format!("{}:{}", device_id, seq);
-        refs.entry(dedup_key).or_insert(WebDavOpRef { device_id, seq });
+        refs.entry(dedup_key)
+            .or_insert(WebDavOpRef { device_id, seq });
     }
 
     let mut out: Vec<WebDavOpRef> = refs.into_values().collect();
@@ -2237,7 +2252,10 @@ async fn rebuild_webdav_sync_head(
 
     for device_id in list_webdav_snapshot_ids(client, cfg, &paths.devices_path).await? {
         let snapshot = fetch_webdav_snapshot(client, cfg, &paths.devices_path, &device_id).await?;
-        let updated_at = snapshot.as_ref().map(|snapshot| snapshot.updated_at).unwrap_or(0);
+        let updated_at = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.updated_at)
+            .unwrap_or(0);
         let snapshot_op_seq = snapshot
             .as_ref()
             .map(|snapshot| snapshot.latest_op_seq)
@@ -2250,10 +2268,11 @@ async fn rebuild_webdav_sync_head(
     }
 
     for device_id in list_webdav_snapshot_ids(client, cfg, &paths.settings_path).await? {
-        let updated_at = fetch_webdav_settings_snapshot(client, cfg, &paths.settings_path, &device_id)
-            .await?
-            .map(|snapshot| snapshot.updated_at)
-            .unwrap_or(0);
+        let updated_at =
+            fetch_webdav_settings_snapshot(client, cfg, &paths.settings_path, &device_id)
+                .await?
+                .map(|snapshot| snapshot.updated_at)
+                .unwrap_or(0);
         update_webdav_head_device(&mut head, &device_id, |device| {
             device.settings_updated_at = device.settings_updated_at.max(updated_at);
         });
@@ -2329,7 +2348,8 @@ async fn pull_remote_webdav_ops_from_head(
             match fetch_webdav_ops_batch(client, cfg, ops_path, &op_ref).await? {
                 Some(batch) if batch.device_id == *device_id => {
                     let resolved_entries =
-                        resolve_webdav_items_with_blobs(client, cfg, blobs_path, &batch.entries).await?;
+                        resolve_webdav_items_with_blobs(client, cfg, blobs_path, &batch.entries)
+                            .await?;
                     received += apply_remote_changes(app, &resolved_entries)?;
                     last_seq = last_seq.max(batch.seq).max(seq);
                     cursor_map.insert(device_id.clone(), last_seq);
@@ -2372,7 +2392,8 @@ async fn pull_remote_webdav_snapshots_from_head(
     device_ids.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     for (device_id, _) in device_ids.into_iter().take(MAX_REMOTE_SNAPSHOTS) {
-        if let Some(snapshot) = fetch_webdav_snapshot(client, cfg, devices_path, &device_id).await? {
+        if let Some(snapshot) = fetch_webdav_snapshot(client, cfg, devices_path, &device_id).await?
+        {
             let resolved_entries =
                 resolve_webdav_items_with_blobs(client, cfg, blobs_path, &snapshot.entries).await?;
             remote_items.extend(resolved_entries);
@@ -2418,7 +2439,9 @@ async fn pull_remote_settings_snapshot_from_head(
         return Ok(0);
     }
 
-    let Some(snapshot) = fetch_webdav_settings_snapshot(client, cfg, settings_path, &device_id).await? else {
+    let Some(snapshot) =
+        fetch_webdav_settings_snapshot(client, cfg, settings_path, &device_id).await?
+    else {
         return Ok(0);
     };
     if snapshot.updated_at <= last_applied_ts {
@@ -2428,7 +2451,10 @@ async fn pull_remote_settings_snapshot_from_head(
     let changed = apply_synced_settings(app, &snapshot.settings)?;
     db_state
         .settings_repo
-        .set("cloud_sync_settings_applied_at", &snapshot.updated_at.to_string())
+        .set(
+            "cloud_sync_settings_applied_at",
+            &snapshot.updated_at.to_string(),
+        )
         .map_err(AppError::from)?;
     Ok(changed)
 }
@@ -2552,7 +2578,11 @@ async fn upload_webdav_settings_snapshot(
     };
     let body = serde_json::to_vec(&snapshot)
         .map_err(|e| AppError::Internal(format!("serialize settings snapshot failed: {}", e)))?;
-    let relative = format!("{}/{}.json", settings_path.trim_end_matches('/'), cfg.device_id);
+    let relative = format!(
+        "{}/{}.json",
+        settings_path.trim_end_matches('/'),
+        cfg.device_id
+    );
     upload_webdav_json_resource(client, cfg, &relative, body, "settings snapshot").await?;
     Ok(local_settings)
 }
@@ -2597,7 +2627,8 @@ async fn pull_remote_settings_snapshot(
         if crate::app::system::is_same_device_id(&device_id, &cfg.device_id) {
             continue;
         }
-        if let Some(snapshot) = fetch_webdav_settings_snapshot(client, cfg, settings_path, &device_id).await?
+        if let Some(snapshot) =
+            fetch_webdav_settings_snapshot(client, cfg, settings_path, &device_id).await?
         {
             let replace = latest
                 .as_ref()
@@ -2619,7 +2650,10 @@ async fn pull_remote_settings_snapshot(
     let changed = apply_synced_settings(app, &snapshot.settings)?;
     db_state
         .settings_repo
-        .set("cloud_sync_settings_applied_at", &snapshot.updated_at.to_string())
+        .set(
+            "cloud_sync_settings_applied_at",
+            &snapshot.updated_at.to_string(),
+        )
         .map_err(AppError::from)?;
     Ok(changed)
 }
@@ -2690,7 +2724,10 @@ async fn pull_remote_webdav_ops(
 
 async fn sync_once_http(app: &AppHandle, cfg: &CloudSyncConfig) -> AppResult<CloudSyncStatus> {
     let local_items = collect_local_changes(app, cfg.cursor)?;
-    let endpoint = format!("{}/api/v1/clipboard/sync", cfg.base_url.trim_end_matches('/'));
+    let endpoint = format!(
+        "{}/api/v1/clipboard/sync",
+        cfg.base_url.trim_end_matches('/')
+    );
     let request = CloudSyncRequest {
         device_id: cfg.device_id.clone(),
         cursor: cfg.cursor,
@@ -2725,9 +2762,22 @@ async fn sync_once_http(app: &AppHandle, cfg: &CloudSyncConfig) -> AppResult<Clo
     if received > 0 {
         let _ = app.emit("clipboard-changed", ());
     }
-    let local_max = local_items.iter().map(|x| x.timestamp).max().unwrap_or(cfg.cursor);
-    let remote_max = body.entries.iter().map(|x| x.timestamp).max().unwrap_or(cfg.cursor);
-    let next_cursor = body.cursor.unwrap_or(cfg.cursor).max(local_max).max(remote_max);
+    let local_max = local_items
+        .iter()
+        .map(|x| x.timestamp)
+        .max()
+        .unwrap_or(cfg.cursor);
+    let remote_max = body
+        .entries
+        .iter()
+        .map(|x| x.timestamp)
+        .max()
+        .unwrap_or(cfg.cursor);
+    let next_cursor = body
+        .cursor
+        .unwrap_or(cfg.cursor)
+        .max(local_max)
+        .max(remote_max);
 
     if let Some(db_state) = app.try_state::<DbState>() {
         let _ = db_state
@@ -2781,16 +2831,15 @@ async fn sync_once_webdav(app: &AppHandle, cfg: &CloudSyncConfig) -> AppResult<C
         });
         sync_head_dirty = true;
     }
-    let (mut received_items, head_stale) =
-        pull_remote_webdav_ops_from_head(
-            app,
-            &client,
-            cfg,
-            &paths.blobs_path,
-            &paths.ops_path,
-            &sync_head,
-        )
-        .await?;
+    let (mut received_items, head_stale) = pull_remote_webdav_ops_from_head(
+        app,
+        &client,
+        cfg,
+        &paths.blobs_path,
+        &paths.ops_path,
+        &sync_head,
+    )
+    .await?;
     if head_stale {
         let rebuilt = rebuild_webdav_sync_head(&client, cfg, &paths).await?;
         if rebuilt != sync_head {
@@ -2801,16 +2850,15 @@ async fn sync_once_webdav(app: &AppHandle, cfg: &CloudSyncConfig) -> AppResult<C
         }
         received_items +=
             pull_remote_webdav_ops(app, &client, cfg, &paths.blobs_path, &paths.ops_path).await?;
-        received_items +=
-            pull_remote_webdav_snapshots_from_head(
-                app,
-                &client,
-                cfg,
-                &paths.blobs_path,
-                &paths.devices_path,
-                &sync_head,
-            )
-            .await?;
+        received_items += pull_remote_webdav_snapshots_from_head(
+            app,
+            &client,
+            cfg,
+            &paths.blobs_path,
+            &paths.devices_path,
+            &sync_head,
+        )
+        .await?;
     }
 
     // Incremental Emoji Sync check
@@ -2832,21 +2880,25 @@ async fn sync_once_webdav(app: &AppHandle, cfg: &CloudSyncConfig) -> AppResult<C
     let cursor_map = load_webdav_op_cursor_map(app);
 
     if should_pull_webdav_snapshot(app, now, !cursor_map.is_empty(), cfg.snapshot_interval_secs) {
-        received_items +=
-            pull_remote_webdav_snapshots_from_head(
-                app,
-                &client,
-                cfg,
-                &paths.blobs_path,
-                &paths.devices_path,
-                &sync_head,
-            )
-            .await?;
+        received_items += pull_remote_webdav_snapshots_from_head(
+            app,
+            &client,
+            cfg,
+            &paths.blobs_path,
+            &paths.devices_path,
+            &sync_head,
+        )
+        .await?;
 
         // Also pull remote settings when pulling snapshots
-        let settings_changed =
-            pull_remote_settings_snapshot_from_head(app, &client, cfg, &paths.settings_path, &sync_head)
-                .await?;
+        let settings_changed = pull_remote_settings_snapshot_from_head(
+            app,
+            &client,
+            cfg,
+            &paths.settings_path,
+            &sync_head,
+        )
+        .await?;
         received_items += settings_changed;
 
         set_setting_i64(app, CLOUD_SYNC_WEBDAV_LAST_SNAPSHOT_PULL_AT_KEY, now);
@@ -2863,8 +2915,14 @@ async fn sync_once_webdav(app: &AppHandle, cfg: &CloudSyncConfig) -> AppResult<C
             &mut webdav_blob_cache,
         )
         .await?;
-        upload_webdav_snapshot(&client, cfg, &paths.devices_path, latest_op_seq, &prepared_local_items)
-            .await?;
+        upload_webdav_snapshot(
+            &client,
+            cfg,
+            &paths.devices_path,
+            latest_op_seq,
+            &prepared_local_items,
+        )
+        .await?;
         uploaded_items += local_items.len();
         update_webdav_head_device(&mut sync_head, &cfg.device_id, |device| {
             device.latest_op_seq = device.latest_op_seq.max(latest_op_seq);
@@ -2874,7 +2932,8 @@ async fn sync_once_webdav(app: &AppHandle, cfg: &CloudSyncConfig) -> AppResult<C
         sync_head_dirty = true;
 
         // Also push local settings when pushing snapshots
-        let local_settings = upload_webdav_settings_snapshot(app, &client, cfg, &paths.settings_path).await?;
+        let local_settings =
+            upload_webdav_settings_snapshot(app, &client, cfg, &paths.settings_path).await?;
         uploaded_items += local_settings.len();
         update_webdav_head_device(&mut sync_head, &cfg.device_id, |device| {
             device.settings_updated_at = device.settings_updated_at.max(now_ms());
@@ -3095,7 +3154,9 @@ pub fn start_cloud_sync_client(app: AppHandle) {
             }
 
             if cfg.auto_sync {
-                let interval = cfg.interval_secs.clamp(MIN_INTERVAL_SECS, MAX_INTERVAL_SECS);
+                let interval = cfg
+                    .interval_secs
+                    .clamp(MIN_INTERVAL_SECS, MAX_INTERVAL_SECS);
                 let mut elapsed = 0u64;
                 while elapsed < interval {
                     requested = CLOUD_SYNC_REQUESTED.swap(false, Ordering::Relaxed);
@@ -3124,13 +3185,21 @@ pub fn restart_cloud_sync_client(app: AppHandle) {
 }
 
 pub async fn cloud_sync_now(app: AppHandle) -> AppResult<CloudSyncStatus> {
-    let cfg = get_config(&app).ok_or_else(|| AppError::Internal("DB state unavailable".to_string()))?;
+    let cfg =
+        get_config(&app).ok_or_else(|| AppError::Internal("DB state unavailable".to_string()))?;
     sync_once(&app, &cfg).await
 }
 
 fn check_and_create_emoji_sync_op(app: &AppHandle) -> AppResult<Option<CloudSyncItem>> {
-    let db_state = app.try_state::<DbState>().ok_or_else(|| AppError::Internal("DB unavailable".to_string()))?;
-    let emoji_json = db_state.settings_repo.get(EMOJI_FAVORITES_SETTING_KEY).ok().flatten().unwrap_or_default();
+    let db_state = app
+        .try_state::<DbState>()
+        .ok_or_else(|| AppError::Internal("DB unavailable".to_string()))?;
+    let emoji_json = db_state
+        .settings_repo
+        .get(EMOJI_FAVORITES_SETTING_KEY)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     let merged_emoji_json = stable_emoji_favorites_json(local_emoji_favorite_set(app, &emoji_json));
 
     if merged_emoji_json != emoji_json {
@@ -3144,7 +3213,8 @@ fn check_and_create_emoji_sync_op(app: &AppHandle) -> AppResult<Option<CloudSync
         return Ok(None);
     }
 
-    let encoded_emoji_json = encode_emoji_favorites_setting(&merged_emoji_json).unwrap_or_else(|| "[]".to_string());
+    let encoded_emoji_json =
+        encode_emoji_favorites_setting(&merged_emoji_json).unwrap_or_else(|| "[]".to_string());
     if encoded_emoji_json.trim().is_empty() || encoded_emoji_json == "[]" {
         return Ok(None);
     }
@@ -3176,8 +3246,15 @@ fn check_and_create_emoji_sync_op(app: &AppHandle) -> AppResult<Option<CloudSync
 }
 
 fn merge_remote_emojis(app: &AppHandle, remote_json: &str) -> AppResult<()> {
-    let db_state = app.try_state::<DbState>().ok_or_else(|| AppError::Internal("DB unavailable".to_string()))?;
-    let local_json = db_state.settings_repo.get(EMOJI_FAVORITES_SETTING_KEY).ok().flatten().unwrap_or_default();
+    let db_state = app
+        .try_state::<DbState>()
+        .ok_or_else(|| AppError::Internal("DB unavailable".to_string()))?;
+    let local_json = db_state
+        .settings_repo
+        .get(EMOJI_FAVORITES_SETTING_KEY)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
 
     let mut local_set = local_emoji_favorite_set(app, &local_json);
     let decoded_remote_json = decode_emoji_favorites_setting(app, remote_json)?;
@@ -3189,7 +3266,10 @@ fn merge_remote_emojis(app: &AppHandle, remote_json: &str) -> AppResult<()> {
 
     let new_json = stable_emoji_favorites_json(local_set);
     if new_json != local_json {
-        db_state.settings_repo.set(EMOJI_FAVORITES_SETTING_KEY, &new_json).map_err(AppError::from)?;
+        db_state
+            .settings_repo
+            .set(EMOJI_FAVORITES_SETTING_KEY, &new_json)
+            .map_err(AppError::from)?;
 
         let payload = encode_emoji_favorites_setting(&new_json).unwrap_or_else(|| "[]".to_string());
         LAST_PUSHED_EMOJI_HASH.store(emoji_sync_payload_hash(&payload), Ordering::Relaxed);
@@ -3203,9 +3283,9 @@ fn merge_remote_emojis(app: &AppHandle, remote_json: &str) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_webdav_relative_path, normalize_webdav_base_path, should_store_content_in_blob,
-        webdav_blob_relative_path, webdav_collection_url_for, webdav_resource_url_for,
-        CloudSyncConfig, CloudSyncItem, CloudSyncProvider,
+        content_blob_kind, encode_webdav_relative_path, normalize_webdav_base_path,
+        should_store_content_in_blob, webdav_blob_relative_path, webdav_collection_url_for,
+        webdav_resource_url_for, CloudSyncConfig, CloudSyncItem, CloudSyncProvider,
     };
 
     fn test_cfg(webdav_url: &str) -> CloudSyncConfig {
