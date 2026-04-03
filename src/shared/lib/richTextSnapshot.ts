@@ -7,7 +7,7 @@ import {
 } from "./repairHtmlFragment";
 
 const SNAPSHOT_CACHE_LIMIT = 240;
-const SNAPSHOT_CACHE_VERSION = "v6";
+const SNAPSHOT_CACHE_VERSION = "v8";
 const snapshotCache = new Map<string, string>();
 
 const RICH_IMAGE_FALLBACK_PREFIX = "<!--TIEZ_RICH_IMAGE:";
@@ -561,14 +561,29 @@ const buildTabularSnapshotSvg = (
   width: number,
   maxHeight: number
 ): string | null => {
-  const outerPadding = 1;
-  const rowHeight = 28;
+  const outerPadding = 2;
+  const rowHeight = 26;
+  const headerRowHeight = 28;
+  const cellPadX = 8;
+  const fontSize = 12;
+  const borderColor = "#c6cbd1";
+  const headerBg = "#f0f3f6";
+  const headerColor = "#24292e";
+  const evenRowBg = "#ffffff";
+  const oddRowBg = "#f8f9fb";
+  const defaultTextColor = "#24292e";
+
   const visibleRowCount = Math.max(
     1,
     Math.min(snapshot.rows.length, Math.floor((maxHeight - outerPadding * 2) / rowHeight))
   );
   const rows = snapshot.rows.slice(0, visibleRowCount);
   if (!rows.length) return null;
+
+  // Detect if first row is a header (all bold or all th-style background)
+  const firstRowIsHeader = rows[0].every(
+    (cell) => cell.bold || cell.background === "#dbe8ff"
+  );
 
   const gridWidth = Math.max(160, width - outerPadding * 2);
   const weights = Array.from({ length: snapshot.columnCount }, () => 1);
@@ -602,19 +617,49 @@ const buildTabularSnapshotSvg = (
     runningX += colWidth;
   }
 
-  const height = rows.length * rowHeight + outerPadding * 2;
+  const totalRowsHeight = rows.reduce((sum, _, idx) =>
+    sum + (idx === 0 && firstRowIsHeader ? headerRowHeight : rowHeight), 0);
+  const height = totalRowsHeight + outerPadding * 2;
+  const tableRight = outerPadding + gridWidth;
   const parts: string[] = [
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
-    `<rect x="0.5" y="0.5" width="${Math.max(1, width - 1)}" height="${Math.max(
-      1,
-      height - 1
-    )}" rx="4" ry="4" fill="#ffffff" stroke="#cfd6df" />`,
+    // Outer background with subtle rounded corners
+    `<rect x="${outerPadding}" y="${outerPadding}" width="${gridWidth}" height="${totalRowsHeight}" rx="3" ry="3" fill="${evenRowBg}" />`,
   ];
 
+  let currentY = outerPadding;
+
   rows.forEach((row, rowIndex) => {
-    const y = outerPadding + rowIndex * rowHeight;
+    const isHeader = rowIndex === 0 && firstRowIsHeader;
+    const curRowHeight = isHeader ? headerRowHeight : rowHeight;
+    const y = currentY;
     let colIndex = 0;
 
+    // Row background
+    const rowBg = isHeader
+      ? headerBg
+      : rowIndex % 2 === 0
+        ? evenRowBg
+        : oddRowBg;
+
+    // Clip to rounded corners for first and last row
+    if (rowIndex === 0) {
+      parts.push(
+        `<clipPath id="topClip"><rect x="${outerPadding}" y="${y}" width="${gridWidth}" height="${curRowHeight}" rx="3" ry="3" /></clipPath>`,
+        `<rect x="${outerPadding}" y="${y}" width="${gridWidth}" height="${curRowHeight}" fill="${rowBg}" clip-path="url(#topClip)" />`
+      );
+    } else if (rowIndex === rows.length - 1) {
+      parts.push(
+        `<clipPath id="botClip"><rect x="${outerPadding}" y="${y}" width="${gridWidth}" height="${curRowHeight}" rx="3" ry="3" /></clipPath>`,
+        `<rect x="${outerPadding}" y="${y}" width="${gridWidth}" height="${curRowHeight}" fill="${rowBg}" clip-path="url(#botClip)" />`
+      );
+    } else {
+      parts.push(
+        `<rect x="${outerPadding}" y="${y}" width="${gridWidth}" height="${curRowHeight}" fill="${rowBg}" />`
+      );
+    }
+
+    // Cell backgrounds that differ from row bg, and cell text
     row.forEach((cell) => {
       if (colIndex >= columnWidths.length) return;
       const x = colOffsets[colIndex];
@@ -622,15 +667,21 @@ const buildTabularSnapshotSvg = (
         .slice(colIndex, colIndex + cell.colspan)
         .reduce((sum, current) => sum + current, 0);
 
-      parts.push(
-        `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${Math.max(
-          1,
-          cellWidth
-        ).toFixed(2)}" height="${rowHeight.toFixed(
-          2
-        )}" fill="${escapeXmlText(cell.background)}" stroke="#cfd6df" />`
-      );
+      // Draw individual cell background only if it differs from row background
+      const cellBg = cell.background;
+      const normalizedCellBg = cellBg?.toLowerCase();
+      const normalizedRowBg = rowBg.toLowerCase();
+      if (normalizedCellBg && normalizedCellBg !== normalizedRowBg
+        && normalizedCellBg !== "#ffffff" || (isHeader && normalizedCellBg !== headerBg.toLowerCase())) {
+        // Only draw if the cell has a meaningful custom background
+        if (normalizedCellBg !== "#ffffff" && normalizedCellBg !== evenRowBg.toLowerCase()) {
+          parts.push(
+            `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${cellWidth.toFixed(1)}" height="${curRowHeight}" fill="${escapeXmlText(cellBg)}" />`
+          );
+        }
+      }
 
+      // Cell text
       const text = escapeXmlText(truncateCellText(cell.text, cellWidth));
       const anchor =
         cell.align === "center" ? "middle" : cell.align === "right" ? "end" : "start";
@@ -638,20 +689,49 @@ const buildTabularSnapshotSvg = (
         cell.align === "center"
           ? x + cellWidth / 2
           : cell.align === "right"
-          ? x + cellWidth - 8
-          : x + 8;
+            ? x + cellWidth - cellPadX
+            : x + cellPadX;
+
+      const textColor = isHeader
+        ? headerColor
+        : (cell.color && cell.color.toLowerCase() !== "#303846"
+            ? cell.color
+            : defaultTextColor);
+      const fontWeight = isHeader || cell.bold ? 600 : 400;
 
       parts.push(
-        `<text x="${textX.toFixed(2)}" y="${(y + rowHeight / 2 + 0.5).toFixed(
-          2
-        )}" fill="${escapeXmlText(cell.color)}" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="12" font-weight="${
-          cell.bold ? 600 : 400
-        }" dominant-baseline="middle" text-anchor="${anchor}">${text}</text>`
+        `<text x="${textX.toFixed(1)}" y="${(y + curRowHeight / 2 + 1).toFixed(
+          1
+        )}" fill="${escapeXmlText(textColor)}" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="${fontSize}" font-weight="${fontWeight}" dominant-baseline="middle" text-anchor="${anchor}">${text}</text>`
       );
 
       colIndex += cell.colspan;
     });
+
+    // Horizontal grid line below each row (except last)
+    if (rowIndex < rows.length - 1) {
+      const lineY = y + curRowHeight;
+      const lineColor = isHeader ? "#b0b8c1" : borderColor;
+      parts.push(
+        `<line x1="${outerPadding}" y1="${lineY}" x2="${tableRight}" y2="${lineY}" stroke="${lineColor}" stroke-width="${isHeader ? 1.5 : 0.5}" />`
+      );
+    }
+
+    currentY += curRowHeight;
   });
+
+  // Vertical grid lines between columns
+  for (let ci = 1; ci < columnWidths.length; ci++) {
+    const lx = colOffsets[ci];
+    parts.push(
+      `<line x1="${lx}" y1="${outerPadding}" x2="${lx}" y2="${outerPadding + totalRowsHeight}" stroke="${borderColor}" stroke-width="0.5" />`
+    );
+  }
+
+  // Outer border
+  parts.push(
+    `<rect x="${outerPadding}" y="${outerPadding}" width="${gridWidth}" height="${totalRowsHeight}" rx="3" ry="3" fill="none" stroke="${borderColor}" stroke-width="1" />`
+  );
 
   parts.push("</svg>");
   return parts.join("");

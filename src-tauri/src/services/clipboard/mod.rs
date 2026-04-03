@@ -2,6 +2,7 @@ mod pipeline;
 mod utils;
 
 use crate::app_state::SettingsState;
+use crate::database::{calc_image_hash, calc_image_hash_from_bytes, calc_image_hash_from_rgba};
 pub use crate::database::DbState;
 use arboard::Clipboard;
 use base64::Engine;
@@ -17,6 +18,30 @@ const RICH_TEXT_RETRY_DELAYS_MS: [u64; 7] = [0, 40, 80, 140, 220, 360, 560];
 const PRESERVED_NAMED_FORMAT_MAX_COUNT: usize = 12;
 const PRESERVED_NAMED_FORMAT_MAX_BYTES: usize = 1_500_000;
 const PRESERVED_NAMED_FORMAT_TOTAL_BYTES: usize = 4_000_000;
+
+fn clear_recent_image_echo_state() {
+    crate::LAST_APP_SET_HASH.store(0, Ordering::SeqCst);
+    crate::LAST_APP_SET_HASH_ALT.store(0, Ordering::SeqCst);
+    crate::LAST_APP_SET_IMAGE_VISUAL_HASH.store(0, Ordering::SeqCst);
+}
+
+fn should_ignore_recent_image_echo(raw_hash: u64, visual_hash: u64) -> bool {
+    let last_app_hash = crate::LAST_APP_SET_HASH.load(Ordering::SeqCst);
+    let last_app_hash_alt = crate::LAST_APP_SET_HASH_ALT.load(Ordering::SeqCst);
+    let last_app_visual_hash = crate::LAST_APP_SET_IMAGE_VISUAL_HASH.load(Ordering::SeqCst);
+    let last_app_time = crate::LAST_APP_SET_TIMESTAMP.load(Ordering::SeqCst);
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if now_secs.saturating_sub(last_app_time) >= 10 {
+        return false;
+    }
+
+    ((last_app_hash != 0) && (last_app_hash == raw_hash || last_app_hash_alt == raw_hash))
+        || ((visual_hash != 0) && last_app_visual_hash == visual_hash)
+}
 
 fn should_capture_file_entries(capture_files_enabled: bool) -> bool {
     capture_files_enabled
@@ -351,16 +376,29 @@ pub fn clipboard_image_fallback_data_url() -> Option<String> {
             }
 
             // 2. Some sources (e.g. Office apps) may provide PNG/JPEG custom formats.
+            // Avoid the expensive decode→re-encode round-trip when possible.
             for name in ["PNG", "image/png", "JFIF", "JPEG", "image/jpeg", "image/webp", "WebP"] {
                 if let Some(raw) =
                     crate::infrastructure::windows_api::win_clipboard::get_clipboard_raw_format(
                         name,
                     )
                 {
+                    // Fast path: if the raw bytes are already valid PNG/JPEG, skip
+                    // image::load_from_memory + re-encode (saves ~200-800ms).
+                    if raw.len() > 8 && raw[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+                        // Valid PNG header — use directly
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+                        return Some(format!("data:image/png;base64,{}", b64));
+                    }
+                    if raw.len() > 2 && raw[0] == 0xFF && raw[1] == 0xD8 {
+                        // Valid JPEG header — use directly
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+                        return Some(format!("data:image/jpeg;base64,{}", b64));
+                    }
+                    // Fallback: decode and re-encode if format isn't recognized
                     if let Ok(img) = image::load_from_memory(&raw) {
                         let mut bytes: Vec<u8> = Vec::new();
                         let mut cursor = std::io::Cursor::new(&mut bytes);
-                        // Convert to PNG for display fallback
                         if img.write_to(&mut cursor, image::ImageFormat::Png).is_ok() {
                             let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
                             return Some(format!("data:image/png;base64,{}", b64));
@@ -509,10 +547,12 @@ pub fn start_clipboard_monitor(app_handle: AppHandle) {
             hasher.finish()
         };
 
-        // If content is identical to last processed content within 500ms window, skip
+        // If content is identical to last processed content within 2000ms window, skip.
+        // Rich text sources (Office/WPS) may fire multiple clipboard events over >500ms
+        // because they write formats sequentially and probe_rich_text_payload retries.
         if current_content_hash == monitor_state.last_content_hash
             && current_content_hash != 0
-            && now.saturating_sub(monitor_state.last_process_time) < 500
+            && now.saturating_sub(monitor_state.last_process_time) < 2000
         {
             return;
         }
@@ -595,7 +635,29 @@ pub fn start_clipboard_monitor(app_handle: AppHandle) {
             let rich_text_enabled = settings.capture_rich_text.load(Ordering::Relaxed);
             let initial_text = read_clipboard_text_once(&mut clipboard, &mut cached_text)
                 .filter(|text| !text.trim().is_empty());
+
+            // Fast-path: if the clipboard has a GIF format, skip the expensive
+            // rich text probing entirely and let the image handler (section 3)
+            // process it directly.  Previously GIFs went through rich text
+            // probing → clipboard_image_fallback_data_url → only to be discarded
+            // by `prefer_image`, wasting 0.5–2 s.
+            let clipboard_has_gif = unsafe {
+                ["GIF", "Animated GIF", "gif", "image/gif"].iter().any(|name| {
+                    crate::infrastructure::windows_api::win_clipboard::get_clipboard_raw_format(name).is_some()
+                })
+            };
+
+            // When there's no text and the source isn't a dedicated rich text
+            // application, this is almost certainly a pure image copy (e.g.
+            // right-click → Copy image in a browser).  Rich text probing would
+            // just be discarded by `prefer_image = true` later, so skip it
+            // entirely to avoid 100–1400 ms of wasted retries.
+            let pure_image_copy = initial_text.is_none()
+                && !is_likely_rich_text_source(&source_snapshot);
+
             let should_probe_rich_text = rich_text_enabled
+                && !clipboard_has_gif
+                && !pure_image_copy
                 && (initial_text.is_some()
                     || is_likely_rich_text_source(&source_snapshot)
                     || has_rich_text_candidate_format());
@@ -630,9 +692,24 @@ pub fn start_clipboard_monitor(app_handle: AppHandle) {
                             extract_animated_image_data_url_from_html(&html);
                         let mut html_to_store = html;
 
+                        // When the HTML already has <img> tags with local/renderable
+                        // sources, skip the very expensive clipboard bitmap capture
+                        // (clipboard_image_fallback_data_url reads CF_DIB, does PNG
+                        // encoding + base64, typically 500–2000 ms).  HtmlContent
+                        // renders those images directly via Tauri asset paths.
+                        let html_has_renderable_images = html_to_store
+                            .to_ascii_lowercase()
+                            .contains("<img ");
+
                         if let Some(data_url) = html_animated_gif_fallback
                             .clone()
-                            .or_else(clipboard_image_fallback_data_url)
+                            .or_else(|| {
+                                if html_has_renderable_images {
+                                    None
+                                } else {
+                                    clipboard_image_fallback_data_url()
+                                }
+                            })
                         {
                             html_to_store = attach_rich_image_fallback(&html_to_store, &data_url);
                         }
@@ -676,6 +753,18 @@ pub fn start_clipboard_monitor(app_handle: AppHandle) {
                                 Some(source_snapshot.clone()),
                             );
                             handled = true;
+
+                            // Update content hash after rich text processing so that
+                            // a subsequent clipboard event with the same raw clipboard
+                            // content is correctly deduped within the time window.
+                            // We reuse `current_content_hash` (computed from the raw
+                            // clipboard text + image at the top of the handler) to
+                            // ensure it matches the next event's initial hash.
+                            monitor_state.last_content_hash = current_content_hash;
+                            monitor_state.last_process_time = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
                         }
                     }
                 }
@@ -716,23 +805,13 @@ pub fn start_clipboard_monitor(app_handle: AppHandle) {
                     use std::hash::{Hash, Hasher};
                     gif_data.hash(&mut hasher);
                     let hash = hasher.finish();
+                    let visual_hash = calc_image_hash_from_bytes(&gif_data)
+                        .unwrap_or(hash as i64) as u64;
                     handled = true;
 
                     if hash != monitor_state.last_image_hash {
-                        let last_app_hash = crate::LAST_APP_SET_HASH.load(Ordering::SeqCst);
-                        let last_app_time = crate::LAST_APP_SET_TIMESTAMP.load(Ordering::SeqCst);
-                        let now_secs = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        let last_app_hash_alt = crate::LAST_APP_SET_HASH_ALT.load(Ordering::SeqCst);
-
-                        if last_app_hash != 0
-                            && (last_app_hash == hash || last_app_hash_alt == hash)
-                            && (now_secs - last_app_time) < 10
-                        {
-                            crate::LAST_APP_SET_HASH.store(0, Ordering::SeqCst);
-                            crate::LAST_APP_SET_HASH_ALT.store(0, Ordering::SeqCst);
+                        if should_ignore_recent_image_echo(hash, visual_hash) {
+                            clear_recent_image_echo_state();
                         } else {
                             let b64 = base64::engine::general_purpose::STANDARD.encode(gif_data);
                             process_new_entry(
@@ -752,23 +831,12 @@ pub fn start_clipboard_monitor(app_handle: AppHandle) {
                     use std::hash::{Hash, Hasher};
                     data_url.hash(&mut hasher);
                     let hash = hasher.finish();
+                    let visual_hash = calc_image_hash(&data_url).unwrap_or(hash as i64) as u64;
                     handled = true;
 
                     if hash != monitor_state.last_image_hash {
-                        let last_app_hash = crate::LAST_APP_SET_HASH.load(Ordering::SeqCst);
-                        let last_app_time = crate::LAST_APP_SET_TIMESTAMP.load(Ordering::SeqCst);
-                        let now_secs = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        let last_app_hash_alt = crate::LAST_APP_SET_HASH_ALT.load(Ordering::SeqCst);
-
-                        if last_app_hash != 0
-                            && (last_app_hash == hash || last_app_hash_alt == hash)
-                            && (now_secs - last_app_time) < 10
-                        {
-                            crate::LAST_APP_SET_HASH.store(0, Ordering::SeqCst);
-                            crate::LAST_APP_SET_HASH_ALT.store(0, Ordering::SeqCst);
+                        if should_ignore_recent_image_echo(hash, visual_hash) {
+                            clear_recent_image_echo_state();
                         } else {
                             process_new_entry(
                                 &app,
@@ -783,56 +851,115 @@ pub fn start_clipboard_monitor(app_handle: AppHandle) {
                 }
 
                 if !handled {
-                    if let Some(image) = read_clipboard_image_once(&mut cached_image) {
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    // Fast path: try native PNG/JPEG clipboard formats first.
+                    // Browsers often provide these alongside CF_DIB, and using
+                    // them directly avoids the expensive bitmap → PNG encode.
+                    let fast_data_url: Option<(String, u64, u64)> = {
                         use std::hash::{Hash, Hasher};
-                        image.bytes.hash(&mut hasher);
-                        let hash = hasher.finish();
-
-                        if hash != monitor_state.last_image_hash {
-                            let last_app_hash = crate::LAST_APP_SET_HASH.load(Ordering::SeqCst);
-                            let last_app_time =
-                                crate::LAST_APP_SET_TIMESTAMP.load(Ordering::SeqCst);
-                            let now_secs = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            let last_app_hash_alt =
-                                crate::LAST_APP_SET_HASH_ALT.load(Ordering::SeqCst);
-
-                            if last_app_hash != 0
-                                && (last_app_hash == hash || last_app_hash_alt == hash)
-                                && (now_secs - last_app_time) < 10
+                        let mut result = None;
+                        for name in ["PNG", "image/png", "JFIF", "JPEG", "image/jpeg"] {
+                            if let Some(raw) =
+                                crate::infrastructure::windows_api::win_clipboard::get_clipboard_raw_format(name)
                             {
-                                crate::LAST_APP_SET_HASH.store(0, Ordering::SeqCst);
-                                crate::LAST_APP_SET_HASH_ALT.store(0, Ordering::SeqCst);
-                            } else {
-                                if let Some(img_buf) = image::RgbaImage::from_raw(
-                                    image.width as u32,
-                                    image.height as u32,
-                                    image.bytes,
-                                ) {
-                                    let mut bytes: Vec<u8> = Vec::new();
-                                    let mut cursor = std::io::Cursor::new(&mut bytes);
-                                    if img_buf
-                                        .write_to(&mut cursor, image::ImageFormat::Png)
-                                        .is_ok()
-                                    {
-                                        let b64 =
-                                            base64::engine::general_purpose::STANDARD.encode(bytes);
-                                        process_new_entry(
-                                            &app,
-                                            ClipboardData::Image {
-                                                data_url: format!("data:image/png;base64,{}", b64),
-                                            },
-                                            None,
-                                            Some(source_snapshot.clone()),
-                                        );
-                                        handled = true;
-                                    }
+                                if raw.len() > 8 && raw[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+                                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                    raw.hash(&mut hasher);
+                                    let hash = hasher.finish();
+                                    let visual_hash =
+                                        calc_image_hash_from_bytes(&raw).unwrap_or(hash as i64) as u64;
+                                    let b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+                                    result = Some((
+                                        format!("data:image/png;base64,{}", b64),
+                                        hash,
+                                        visual_hash,
+                                    ));
+                                    break;
+                                }
+                                if raw.len() > 2 && raw[0] == 0xFF && raw[1] == 0xD8 {
+                                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                    raw.hash(&mut hasher);
+                                    let hash = hasher.finish();
+                                    let visual_hash =
+                                        calc_image_hash_from_bytes(&raw).unwrap_or(hash as i64) as u64;
+                                    let b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+                                    result = Some((
+                                        format!("data:image/jpeg;base64,{}", b64),
+                                        hash,
+                                        visual_hash,
+                                    ));
+                                    break;
                                 }
                             }
+                        }
+                        result
+                    };
+
+                    if let Some((data_url, hash, visual_hash)) = fast_data_url {
+                        if hash != monitor_state.last_image_hash {
+                            if should_ignore_recent_image_echo(hash, visual_hash) {
+                                clear_recent_image_echo_state();
+                                handled = true;
+                            } else {
+                                process_new_entry(
+                                    &app,
+                                    ClipboardData::Image { data_url },
+                                    None,
+                                    Some(source_snapshot.clone()),
+                                );
+                                handled = true;
+                            }
                             monitor_state.last_image_hash = hash;
+                        } else {
+                            handled = true;
+                        }
+                    }
+
+                    // Slow fallback: read CF_DIB bitmap and encode to PNG
+                    if !handled {
+                        if let Some(image) = read_clipboard_image_once(&mut cached_image) {
+                            use std::hash::{Hash, Hasher};
+                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                            image.bytes.hash(&mut hasher);
+                            let hash = hasher.finish();
+                            let visual_hash = calc_image_hash_from_rgba(
+                                image.width as u32,
+                                image.height as u32,
+                                &image.bytes,
+                            )
+                            .unwrap_or(hash as i64) as u64;
+
+                            if hash != monitor_state.last_image_hash {
+                                if should_ignore_recent_image_echo(hash, visual_hash) {
+                                    clear_recent_image_echo_state();
+                                    handled = true;
+                                } else {
+                                    if let Some(img_buf) = image::RgbaImage::from_raw(
+                                        image.width as u32,
+                                        image.height as u32,
+                                        image.bytes,
+                                    ) {
+                                        let mut bytes: Vec<u8> = Vec::new();
+                                        let mut cursor = std::io::Cursor::new(&mut bytes);
+                                        if img_buf
+                                            .write_to(&mut cursor, image::ImageFormat::Png)
+                                            .is_ok()
+                                        {
+                                            let b64 =
+                                                base64::engine::general_purpose::STANDARD.encode(bytes);
+                                            process_new_entry(
+                                                &app,
+                                                ClipboardData::Image {
+                                                    data_url: format!("data:image/png;base64,{}", b64),
+                                                },
+                                                None,
+                                                Some(source_snapshot.clone()),
+                                            );
+                                            handled = true;
+                                        }
+                                    }
+                                }
+                                monitor_state.last_image_hash = hash;
+                            }
                         }
                     }
                 }
@@ -871,6 +998,14 @@ pub fn start_clipboard_monitor(app_handle: AppHandle) {
                         crate::LAST_APP_SET_HASH.store(0, Ordering::SeqCst);
                     }
                     monitor_state.last_text = normalized_text.clone();
+
+                    // Update content hash so subsequent events with the same
+                    // text content are deduped within the time window.
+                    monitor_state.last_content_hash = current_content_hash;
+                    monitor_state.last_process_time = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
                     process_new_entry(
                         &app,
                         ClipboardData::Text(normalized_text),

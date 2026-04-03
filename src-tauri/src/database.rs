@@ -52,28 +52,55 @@ pub fn calc_text_hash(content: &str) -> u64 {
     hasher.finish()
 }
 
-pub fn calc_image_hash(base64_data: &str) -> Option<i64> {
-    let parts: Vec<&str> = base64_data.splitn(2, ',').collect();
-    let payload = if parts.len() == 2 {
-        parts[1]
-    } else {
-        base64_data
-    };
-    let payload_clean = payload.replace("\r", "").replace("\n", "");
+fn calc_visual_hash(img: &image::DynamicImage) -> i64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
-    use base64::Engine;
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(payload_clean.trim())
-        .ok()?;
-
-    let img = image::load_from_memory(&decoded).ok()?;
     let thumb = img.resize_exact(32, 32, image::imageops::FilterType::Nearest);
+    let mut hasher = DefaultHasher::new();
+    thumb.as_bytes().hash(&mut hasher);
+    hasher.finish() as i64
+}
+
+pub fn calc_image_hash_from_bytes(bytes: &[u8]) -> Option<i64> {
+    if let Ok(img) = image::load_from_memory(bytes) {
+        return Some(calc_visual_hash(&img));
+    }
 
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
-    thumb.as_bytes().hash(&mut hasher);
+    bytes.hash(&mut hasher);
     Some(hasher.finish() as i64)
+}
+
+pub fn calc_image_hash_from_rgba(width: u32, height: u32, rgba: &[u8]) -> Option<i64> {
+    let buffer = image::RgbaImage::from_raw(width, height, rgba.to_vec())?;
+    let img = image::DynamicImage::ImageRgba8(buffer);
+    Some(calc_visual_hash(&img))
+}
+
+pub fn calc_image_hash(base64_data: &str) -> Option<i64> {
+    let trimmed = base64_data.trim();
+    let bytes = if !trimmed.starts_with("data:")
+        && (trimmed.starts_with('/') || trimmed.contains(":\\"))
+    {
+        std::fs::read(trimmed).ok()?
+    } else {
+        let parts: Vec<&str> = trimmed.splitn(2, ',').collect();
+        let payload = if parts.len() == 2 { parts[1] } else { trimmed };
+        let payload_clean = payload.replace("\r", "").replace("\n", "");
+        if payload_clean.trim().is_empty() {
+            return None;
+        }
+        base64::engine::general_purpose::STANDARD
+            .decode(payload_clean)
+            .ok()?
+    };
+
+    // Prefer a visual fingerprint so the same image still deduplicates after
+    // apps like WeChat re-encode PNG/DIB payloads during paste.
+    calc_image_hash_from_bytes(&bytes)
 }
 
 pub fn init_db(path: &str) -> Result<Connection> {

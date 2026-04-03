@@ -1,5 +1,5 @@
 use crate::app_state::{AppDataDir, PasteQueue, SessionHistory, SettingsState};
-use crate::database::is_text_type;
+use crate::database::{calc_image_hash, is_text_type};
 use crate::database::DbState;
 use crate::domain::models::ClipboardEntry;
 use crate::infrastructure::windows_api::window_tracker::{
@@ -377,6 +377,11 @@ impl PipelineStage for ValidationStage {
                 let session = session_history.0.lock().unwrap();
                 let entry = ctx.entry.as_ref().expect("entry exists");
                 let normalized_content = entry.content.trim().replace("\r\n", "\n");
+                let entry_image_hash = if entry.content_type == "image" {
+                    calc_image_hash(&entry.content)
+                } else {
+                    None
+                };
                 for item in session.iter() {
                     let item_normalized = item.content.trim().replace("\r\n", "\n");
                     let html_match =
@@ -388,9 +393,14 @@ impl PipelineStage for ValidationStage {
                         } else {
                             true
                         };
-                    let match_found = (item.content == entry.content
+                    let image_match = entry.content_type == "image"
+                        && item.content_type == "image"
+                        && entry_image_hash.is_some()
+                        && calc_image_hash(&item.content) == entry_image_hash;
+                    let text_match = (item.content == entry.content
                         || item_normalized == normalized_content)
                         && html_match;
+                    let match_found = image_match || text_match;
                     if match_found {
                         removed_ids.push(item.id);
                         if !persistent_enabled {

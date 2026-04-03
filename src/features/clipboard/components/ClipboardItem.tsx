@@ -691,8 +691,17 @@ const ClipboardItem = ({
     const spreadsheetLikeRichSource = item.content_type === "rich_text"
         && !!item.html_content
         && isSpreadsheetLikeSource(item.source_app, item.source_app_path);
+    const richTextHasAnimatedImageFallback = isAnimatedGifSrc(
+        richTextFallback?.imagePayload || richTextFallback?.imageSrc || null
+    );
+    const preferHtmlRichPreview = item.content_type === "rich_text"
+        && !!item.html_content
+        && !richTextHasAnimatedImageFallback
+        && !richHtmlLooksTabular(richTextCleanHtml)
+        && !spreadsheetLikeRichSource;
     const preferGeneratedRichPreview = item.content_type === "rich_text"
         && !!item.html_content
+        && !preferHtmlRichPreview
         && (
             !!richTextSnapshotPreview
             || richHtmlLooksTabular(richTextCleanHtml)
@@ -719,11 +728,18 @@ const ClipboardItem = ({
     const effectiveRichImageFallbackSrc = !richImageFallbackFailed
         ? (richTextFallback?.imageSrc || null)
         : null;
-    const richTextPreviewSrc = isAnimatedGifSrc(
-        richTextFallback?.imagePayload || effectiveRichImageFallbackSrc
-    )
+    // For tabular/spreadsheet sources, prefer the real clipboard bitmap image
+    // (same image you see when pasting Excel into WeChat) over the generated SVG snapshot.
+    // For animated GIFs, always prefer the image fallback.
+    // For other rich text, prefer the SVG snapshot for consistency.
+    const preferImageFallbackForTabular = (
+        richHtmlLooksTabular(richTextCleanHtml) || spreadsheetLikeRichSource
+    ) && !!effectiveRichImageFallbackSrc;
+    const richTextPreviewSrc = richTextHasAnimatedImageFallback
         ? (effectiveRichImageFallbackSrc || effectiveRichTextSnapshotSrc)
-        : (effectiveRichTextSnapshotSrc || effectiveRichImageFallbackSrc);
+        : preferImageFallbackForTabular
+            ? (effectiveRichImageFallbackSrc || effectiveRichTextSnapshotSrc)
+            : (effectiveRichTextSnapshotSrc || null);
     const useSnapshotPreviewImage = !!richTextPreviewSrc && richTextPreviewSrc === effectiveRichTextSnapshotSrc;
     const useRichImageFallback = !!richTextPreviewSrc && richTextPreviewSrc === effectiveRichImageFallbackSrc;
     const visibleTagCount = item.tags?.length || 0;

@@ -330,20 +330,7 @@ impl SqliteClipboardRepository {
         }
 
         let calculated_hash = if entry.content_type == "image" {
-            if entry.content.starts_with("data:") {
-                calc_image_hash(&entry.content).unwrap_or(0)
-            } else {
-                if let Ok(img) = image::open(&entry.content) {
-                    let thumb = img.resize_exact(32, 32, image::imageops::FilterType::Nearest);
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    thumb.as_bytes().hash(&mut hasher);
-                    hasher.finish() as i64
-                } else {
-                    0
-                }
-            }
+            calc_image_hash(&final_content).unwrap_or(0)
         } else {
             calc_text_hash(&final_content) as i64
         };
@@ -536,6 +523,24 @@ impl SqliteClipboardRepository {
                     .map_err(|e| e.to_string())?;
                 if let Some(row) = rows.next().map_err(|e| e.to_string())? {
                     return Ok(Some(row.get(0).map_err(|e| e.to_string())?));
+                }
+
+                let mut fallback_stmt = conn
+                    .prepare(
+                        "SELECT id, content FROM clipboard_history \
+                     WHERE content_type = 'image' \
+                     ORDER BY timestamp DESC \
+                     LIMIT 200",
+                    )
+                    .map_err(|e| e.to_string())?;
+                let mut fallback_rows = fallback_stmt.query([]).map_err(|e| e.to_string())?;
+                while let Some(row) = fallback_rows.next().map_err(|e| e.to_string())? {
+                    let id: i64 = row.get(0).map_err(|e| e.to_string())?;
+                    let stored_content_raw: String = row.get(1).map_err(|e| e.to_string())?;
+                    let stored_content = self.maybe_decrypt_text(&stored_content_raw);
+                    if calc_image_hash(&stored_content) == Some(hash) {
+                        return Ok(Some(id));
+                    }
                 }
                 return Ok(None);
             }

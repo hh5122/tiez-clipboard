@@ -190,14 +190,28 @@ const CompactPreviewWindow = () => {
         const { cleanHtml } = extractRichImageFallback(payload.htmlContent);
         return cleanHtml || payload.htmlContent;
     }, [payload]);
+    const richTextHasAnimatedImageFallback = useMemo(() => (
+        isAnimatedGifSrc(richImageFallback?.payload || richImageFallback?.src || null)
+    ), [richImageFallback]);
+    const preferHtmlRichPreview = useMemo(() => {
+        if (!payload || payload.contentType !== "rich_text" || !payload.htmlContent) return false;
+        return (
+            !richTextHasAnimatedImageFallback
+            && !richHtmlLooksTabular(richTextCleanHtml)
+            && !isSpreadsheetLikeSource(payload.sourceApp)
+        );
+    }, [payload, richTextCleanHtml, richTextHasAnimatedImageFallback]);
     const preferGeneratedRichPreview = useMemo(() => {
         if (!payload || payload.contentType !== "rich_text" || !payload.htmlContent) return false;
         return (
-            !!payload.richTextSnapshotPreview
-            || richHtmlLooksTabular(richTextCleanHtml)
-            || isSpreadsheetLikeSource(payload.sourceApp)
+            !preferHtmlRichPreview
+            && (
+                !!payload.richTextSnapshotPreview
+                || richHtmlLooksTabular(richTextCleanHtml)
+                || isSpreadsheetLikeSource(payload.sourceApp)
+            )
         );
-    }, [payload, richTextCleanHtml]);
+    }, [payload, preferHtmlRichPreview, richTextCleanHtml]);
     const richTextSnapshotSrc = useMemo(() => {
         if (!payload || payload.contentType !== "rich_text" || !payload.htmlContent) return null;
         if (!preferGeneratedRichPreview) return null;
@@ -209,11 +223,16 @@ const CompactPreviewWindow = () => {
     }, [payload, preferGeneratedRichPreview, richTextCleanHtml]);
     const effectiveRichTextSnapshotSrc = snapshotFailed ? null : richTextSnapshotSrc;
     const effectiveRichImageFallbackSrc = richImageFallbackFailed ? null : (richImageFallback?.src || null);
-    const richTextPreviewSrc = isAnimatedGifSrc(
-        richImageFallback?.payload || effectiveRichImageFallbackSrc
-    )
+    // For tabular/spreadsheet sources, prefer the real clipboard bitmap image
+    // (same image you see when pasting Excel into WeChat) over the generated SVG snapshot.
+    const preferImageFallbackForTabular = (
+        richHtmlLooksTabular(richTextCleanHtml) || isSpreadsheetLikeSource(payload?.sourceApp)
+    ) && !!effectiveRichImageFallbackSrc;
+    const richTextPreviewSrc = richTextHasAnimatedImageFallback
         ? (effectiveRichImageFallbackSrc || effectiveRichTextSnapshotSrc)
-        : (effectiveRichTextSnapshotSrc || effectiveRichImageFallbackSrc);
+        : preferImageFallbackForTabular
+            ? (effectiveRichImageFallbackSrc || effectiveRichTextSnapshotSrc)
+            : (effectiveRichTextSnapshotSrc || null);
     const useSnapshotPreviewImage = !!richTextPreviewSrc && richTextPreviewSrc === effectiveRichTextSnapshotSrc;
     const useRichImageFallback = !!richTextPreviewSrc && richTextPreviewSrc === effectiveRichImageFallbackSrc;
 
@@ -559,7 +578,7 @@ const CompactPreviewWindow = () => {
         <div className="compact-preview-root">
             <div
                 ref={containerRef}
-                className={`compact-popover-portal compact-preview-window theme-${normalizeThemeId(payload?.theme || DEFAULT_THEME)} ${payload?.contentType === "image" ? "compact-preview-image" : ""} ${payload?.contentType === "image" || payload?.contentType === "video" || !!effectiveRichImageFallbackSrc || !!effectiveRichTextSnapshotSrc ? "compact-preview-media" : ""} ${payload?.colorMode === "dark" ? "dark-mode" : ""}`}
+                className={`compact-popover-portal compact-preview-window theme-${normalizeThemeId(payload?.theme || DEFAULT_THEME)} ${payload?.contentType === "image" ? "compact-preview-image" : ""} ${payload?.contentType === "image" || payload?.contentType === "video" || !!richTextPreviewSrc ? "compact-preview-media" : ""} ${payload?.colorMode === "dark" ? "dark-mode" : ""}`}
                 style={{
                     display: "flex",
                     flexDirection: "column"

@@ -1,6 +1,6 @@
 // Clipboard operations module
 use crate::app_state::{SessionHistory, SettingsState};
-use crate::database::DbState;
+use crate::database::{calc_image_hash_from_rgba, DbState};
 use crate::error::{AppError, AppResult};
 use crate::infrastructure::repository::clipboard_repo::ClipboardRepository;
 use crate::infrastructure::repository::settings_repo::SettingsRepository;
@@ -491,6 +491,7 @@ pub async fn prepare_clipboard_payload(
     let (content_hash, current_time) = calculate_content_hash(content);
     crate::LAST_APP_SET_HASH.store(content_hash, Ordering::SeqCst);
     crate::LAST_APP_SET_HASH_ALT.store(0, Ordering::SeqCst);
+    crate::LAST_APP_SET_IMAGE_VISUAL_HASH.store(0, Ordering::SeqCst);
     crate::LAST_APP_SET_TIMESTAMP.store(current_time, Ordering::SeqCst);
 
     copy_content_to_system_clipboard(
@@ -524,11 +525,12 @@ async fn copy_content_to_system_clipboard(
                 if content_type == "image" {
                     // For image type with local path, read pixels for better compatibility with chat apps
                     let bytes = std::fs::read(content).map_err(AppError::from)?;
-                    let (primary_hash, _secondary_hash) =
+                    let (primary_hash, secondary_hash, visual_hash) =
                         copy_image_bytes_to_clipboard(bytes, current_time)?;
-                    // Keep LAST_APP_SET_HASH as content_hash (path hash)
-                    // Store pixel/byte hash in HASH_ALT
-                    crate::LAST_APP_SET_HASH_ALT.store(primary_hash, Ordering::SeqCst);
+                    crate::LAST_APP_SET_HASH.store(primary_hash, Ordering::SeqCst);
+                    crate::LAST_APP_SET_HASH_ALT.store(secondary_hash, Ordering::SeqCst);
+                    crate::LAST_APP_SET_IMAGE_VISUAL_HASH
+                        .store(visual_hash, Ordering::SeqCst);
                 } else {
                     unsafe {
                         crate::infrastructure::windows_api::win_clipboard::set_clipboard_files(
@@ -548,11 +550,11 @@ async fn copy_content_to_system_clipboard(
                     .decode(b64_data)
                     .map_err(|e| AppError::Internal(format!("Base64 解码失败: {}", e)))?;
 
-                let (primary_hash, _secondary_hash) =
+                let (primary_hash, secondary_hash, visual_hash) =
                     copy_image_bytes_to_clipboard(bytes, current_time)?;
-                // Keep LAST_APP_SET_HASH as content_hash (dataurl hash)
-                // Store pixel/byte hash in HASH_ALT
-                crate::LAST_APP_SET_HASH_ALT.store(primary_hash, Ordering::SeqCst);
+                crate::LAST_APP_SET_HASH.store(primary_hash, Ordering::SeqCst);
+                crate::LAST_APP_SET_HASH_ALT.store(secondary_hash, Ordering::SeqCst);
+                crate::LAST_APP_SET_IMAGE_VISUAL_HASH.store(visual_hash, Ordering::SeqCst);
             } else {
                 let mut clipboard = arboard::Clipboard::new().map_err(AppError::from)?;
                 clipboard
@@ -572,18 +574,22 @@ async fn copy_content_to_system_clipboard(
                     } else {
                         clean_html.as_str()
                     };
-                    let cf_html = generate_cf_html(html_for_paste);
+                        let cf_html = generate_cf_html(html_for_paste);
 
-                    if let Some(payload) = fallback_image_data_url {
-                        if let Some(bytes) = resolve_rich_image_fallback_bytes(&payload) {
-                            let (primary_hash, _secondary_hash) =
-                                copy_image_bytes_to_clipboard(bytes, current_time)?;
-                            crate::LAST_APP_SET_HASH_ALT.store(primary_hash, Ordering::SeqCst);
-                            unsafe {
-                                crate::infrastructure::windows_api::win_clipboard::append_clipboard_text_and_html(content, &cf_html)
-                                    .map_err(AppError::from)?;
-                                crate::infrastructure::windows_api::win_clipboard::append_named_clipboard_formats(&preserved_named_formats)
-                                    .map_err(AppError::from)?;
+                        if let Some(payload) = fallback_image_data_url {
+                            if let Some(bytes) = resolve_rich_image_fallback_bytes(&payload) {
+                                let (primary_hash, secondary_hash, visual_hash) =
+                                    copy_image_bytes_to_clipboard(bytes, current_time)?;
+                                crate::LAST_APP_SET_HASH.store(primary_hash, Ordering::SeqCst);
+                                crate::LAST_APP_SET_HASH_ALT
+                                    .store(secondary_hash, Ordering::SeqCst);
+                                crate::LAST_APP_SET_IMAGE_VISUAL_HASH
+                                    .store(visual_hash, Ordering::SeqCst);
+                                unsafe {
+                                    crate::infrastructure::windows_api::win_clipboard::append_clipboard_text_and_html(content, &cf_html)
+                                        .map_err(AppError::from)?;
+                                    crate::infrastructure::windows_api::win_clipboard::append_named_clipboard_formats(&preserved_named_formats)
+                                        .map_err(AppError::from)?;
                             }
                         } else {
                             unsafe {
@@ -691,7 +697,7 @@ fn generate_cf_html(html: &str) -> String {
     );
     format!("{}{}", header, html_content)
 }
-fn copy_image_bytes_to_clipboard(bytes: Vec<u8>, current_time: u64) -> AppResult<(u64, u64)> {
+fn copy_image_bytes_to_clipboard(bytes: Vec<u8>, current_time: u64) -> AppResult<(u64, u64, u64)> {
     // Check if it's a GIF by magic number
     let is_gif = bytes.len() > 3 && &bytes[0..3] == b"GIF";
 
@@ -705,27 +711,20 @@ fn copy_image_bytes_to_clipboard(bytes: Vec<u8>, current_time: u64) -> AppResult
 
     crate::LAST_APP_SET_TIMESTAMP.store(current_time, Ordering::SeqCst);
 
-    let (primary_hash, secondary_hash) = if is_gif {
-        let mut hasher = DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        let byte_hash = hasher.finish();
-
-        // Calculate pixel hash of the first frame as a secondary fingerprint
-        let pixel_count = (width as u64) * (height as u64);
-        let mut h = pixel_count;
-        if !raw_bytes.is_empty() {
-            h = h
-                .wrapping_add(raw_bytes[0] as u64)
-                .wrapping_add(raw_bytes[raw_bytes.len() / 2] as u64)
-                .wrapping_add(raw_bytes[raw_bytes.len() - 1] as u64);
-        }
-        (byte_hash, h)
-    } else {
-        // Hash full pixel bytes so the monitor can skip our own image copy
+    let pixel_hash = {
         let mut hasher = DefaultHasher::new();
         raw_bytes.hash(&mut hasher);
-        let byte_hash = hasher.finish();
-        (byte_hash, 0)
+        hasher.finish()
+    };
+    let visual_hash = calc_image_hash_from_rgba(width, height, &raw_bytes)
+        .unwrap_or(pixel_hash as i64) as u64;
+
+    let gif_hash = if is_gif {
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        Some(hasher.finish())
+    } else {
+        None
     };
 
     // Prepare PNG data for better compatibility
@@ -737,6 +736,12 @@ fn copy_image_bytes_to_clipboard(bytes: Vec<u8>, current_time: u64) -> AppResult
         image::ImageFormat::Png,
     )
     .map_err(|e| AppError::Internal(format!("编码 PNG 失败: {}", e)))?;
+
+    let png_hash = {
+        let mut hasher = DefaultHasher::new();
+        png_buf.hash(&mut hasher);
+        hasher.finish()
+    };
 
     let gif_temp_path = unsafe {
         crate::infrastructure::windows_api::win_clipboard::set_clipboard_image_with_formats(
@@ -757,10 +762,10 @@ fn copy_image_bytes_to_clipboard(bytes: Vec<u8>, current_time: u64) -> AppResult
         let mut hasher = DefaultHasher::new();
         normalized.hash(&mut hasher);
         let path_hash = hasher.finish();
-        crate::LAST_APP_SET_HASH.store(path_hash, Ordering::SeqCst);
+        return Ok((path_hash, gif_hash.unwrap_or(png_hash), visual_hash));
     }
 
-    Ok((primary_hash, secondary_hash))
+    Ok((gif_hash.unwrap_or(png_hash), pixel_hash, visual_hash))
 }
 
 async fn copy_text_with_retry(content: &str) -> AppResult<()> {
