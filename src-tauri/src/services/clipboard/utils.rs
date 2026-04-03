@@ -354,6 +354,20 @@ fn collapse_preview_whitespace(text: &str) -> String {
         .to_string()
 }
 
+pub fn build_clipboard_text_fingerprint(
+    content_type: &str,
+    content: &str,
+    html_content: Option<&str>,
+) -> String {
+    match content_type {
+        "rich_text" => collapse_preview_whitespace(&derive_rich_text_content(content, html_content)),
+        "text" | "code" | "url" => {
+            collapse_preview_whitespace(&normalize_clipboard_plain_text(content))
+        }
+        _ => String::new(),
+    }
+}
+
 fn collapse_line_whitespace(text: &str) -> String {
     static WHITESPACE_RE: OnceLock<Regex> = OnceLock::new();
 

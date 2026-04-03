@@ -2,7 +2,9 @@ mod pipeline;
 mod utils;
 
 use crate::app_state::SettingsState;
-use crate::database::{calc_image_hash, calc_image_hash_from_bytes, calc_image_hash_from_rgba};
+use crate::database::{
+    calc_image_hash, calc_image_hash_from_bytes, calc_image_hash_from_rgba, calc_text_hash,
+};
 pub use crate::database::DbState;
 use arboard::Clipboard;
 use base64::Engine;
@@ -666,10 +668,10 @@ pub fn start_clipboard_monitor(app_handle: AppHandle) {
                 if let Some((text, html)) =
                     probe_rich_text_payload(&source_snapshot, initial_text.clone())
                 {
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                    use std::hash::{Hash, Hasher};
-                    text.hash(&mut hasher);
-                    let current_hash = hasher.finish();
+                    let normalized_text = normalize_clipboard_plain_text(&text);
+                    let current_hash = calc_text_hash(&normalized_text);
+                    let current_html_hash =
+                        calc_text_hash(&crate::services::clipboard::repair_html_fragment(&html));
 
                     let last_app_hash = crate::LAST_APP_SET_HASH.load(Ordering::SeqCst);
                     let last_app_hash_alt = crate::LAST_APP_SET_HASH_ALT.load(Ordering::SeqCst);
@@ -680,12 +682,14 @@ pub fn start_clipboard_monitor(app_handle: AppHandle) {
                         .as_secs();
 
                     if last_app_hash != 0
-                        && (current_hash == last_app_hash || current_hash == last_app_hash_alt)
+                        && ((current_hash == last_app_hash || current_hash == last_app_hash_alt)
+                            || (current_html_hash == last_app_hash
+                                || current_html_hash == last_app_hash_alt))
                         && (now_secs - last_app_time) < 10
                     {
                         crate::LAST_APP_SET_HASH.store(0, Ordering::SeqCst);
                         crate::LAST_APP_SET_HASH_ALT.store(0, Ordering::SeqCst);
-                        monitor_state.last_text = text;
+                        monitor_state.last_text = normalized_text;
                         handled = true;
                     } else {
                         let html_animated_gif_fallback =
@@ -742,11 +746,11 @@ pub fn start_clipboard_monitor(app_handle: AppHandle) {
                             && (read_clipboard_image_once(&mut cached_image).is_some() || has_gif);
 
                         if !prefer_image {
-                            monitor_state.last_text = text.clone();
+                            monitor_state.last_text = normalized_text.clone();
                             process_new_entry(
                                 &app,
                                 ClipboardData::RichText {
-                                    text,
+                                    text: normalized_text,
                                     html: html_to_store,
                                 },
                                 None,
@@ -1020,8 +1024,8 @@ pub fn start_clipboard_monitor(app_handle: AppHandle) {
 
 pub use pipeline::{ClipboardData, ClipboardPipeline, PipelineContext};
 pub use utils::{
-    attach_rich_image_fallback, attach_rich_named_formats, build_entry_preview,
-    derive_rich_text_content, extract_animated_image_data_url_from_html,
+    attach_rich_image_fallback, attach_rich_named_formats, build_clipboard_text_fingerprint,
+    build_entry_preview, derive_rich_text_content, extract_animated_image_data_url_from_html,
     extract_animated_image_data_url_from_text, parse_cf_html, repair_html_fragment,
     split_rich_html_and_image_fallback, split_rich_html_and_named_formats,
     truncate_html_for_preview,

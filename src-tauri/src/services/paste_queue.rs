@@ -28,7 +28,12 @@ pub fn set_paste_queue(
     item_ids: Vec<i64>,
 ) -> AppResult<()> {
     if item_ids.is_empty() {
-        state.inner().0.lock().unwrap().items.clear();
+        let mut queue = state.inner().0.lock().unwrap();
+        queue.items.clear();
+        queue.last_action_was_paste = false;
+        queue.last_pasted_content = None;
+        queue.last_pasted_fingerprint = None;
+        queue.last_paste_timestamp_ms = 0;
         return Ok(());
     }
 
@@ -39,6 +44,8 @@ pub fn set_paste_queue(
     }
     queue.last_action_was_paste = false;
     queue.last_pasted_content = None;
+    queue.last_pasted_fingerprint = None;
+    queue.last_paste_timestamp_ms = 0;
     drop(queue);
 
     // Automatically prepare the first item
@@ -83,7 +90,6 @@ pub async fn paste_next_step(app_handle: tauri::AppHandle) {
     // 1. Pop item from queue (Scope the lock)
     let id_opt = {
         let mut queue = state.inner().0.lock().unwrap();
-        queue.last_action_was_paste = true;
         queue.items.pop_front()
     };
 
@@ -106,12 +112,12 @@ pub async fn paste_next_step(app_handle: tauri::AppHandle) {
         };
 
         if let Some((content, c_type, html_content)) = content_opt {
-            // CRITICAL: Update last_pasted_content BEFORE modifying clipboard to prevent race condition
-            // where the monitor sees the change before we've marked it as an echo.
-            {
-                let mut queue = state.inner().0.lock().unwrap();
-                queue.last_pasted_content = Some(content.clone());
-            }
+            crate::services::clipboard_ops::remember_recent_paste(
+                &app_handle,
+                &content,
+                &c_type,
+                html_content.as_deref(),
+            );
 
             if let Err(err) = crate::services::clipboard_ops::prepare_clipboard_payload(
                 &content,

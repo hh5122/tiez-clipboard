@@ -1,5 +1,5 @@
 // Clipboard operations module
-use crate::app_state::{SessionHistory, SettingsState};
+use crate::app_state::{PasteQueue, SessionHistory, SettingsState};
 use crate::database::{calc_image_hash_from_rgba, DbState};
 use crate::error::{AppError, AppResult};
 use crate::infrastructure::repository::clipboard_repo::ClipboardRepository;
@@ -231,6 +231,7 @@ pub async fn copy_to_clipboard(
 
     // 1. Handle Window Visibility and Focus
     if paste {
+        remember_recent_paste(&app_handle, &content, &content_type, html_content.as_deref());
         handle_window_focus_for_paste(&app_handle).await?;
     }
 
@@ -313,6 +314,7 @@ pub async fn paste_content_transiently(
         }
     }
 
+    remember_recent_paste(&app_handle, &content, &content_type, html_content.as_deref());
     handle_window_focus_for_paste(&app_handle).await?;
 
     prepare_clipboard_payload(
@@ -489,8 +491,16 @@ pub async fn prepare_clipboard_payload(
     paste_with_format: bool,
 ) -> AppResult<()> {
     let (content_hash, current_time) = calculate_content_hash(content);
+    let rich_alt_hash = if paste_with_format {
+        html_content
+            .map(crate::services::clipboard::repair_html_fragment)
+            .map(|html| calculate_content_hash(&html).0)
+            .unwrap_or(0)
+    } else {
+        0
+    };
     crate::LAST_APP_SET_HASH.store(content_hash, Ordering::SeqCst);
-    crate::LAST_APP_SET_HASH_ALT.store(0, Ordering::SeqCst);
+    crate::LAST_APP_SET_HASH_ALT.store(rich_alt_hash, Ordering::SeqCst);
     crate::LAST_APP_SET_IMAGE_VISUAL_HASH.store(0, Ordering::SeqCst);
     crate::LAST_APP_SET_TIMESTAMP.store(current_time, Ordering::SeqCst);
 
@@ -620,6 +630,45 @@ async fn copy_content_to_system_clipboard(
     }
 
     Ok(())
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+pub(crate) fn clear_recent_paste_marker(app_handle: &tauri::AppHandle) {
+    let queue_state = app_handle.state::<PasteQueue>();
+    let mut queue = queue_state.inner().0.lock().unwrap();
+    queue.last_action_was_paste = false;
+    queue.last_pasted_content = None;
+    queue.last_pasted_fingerprint = None;
+    queue.last_paste_timestamp_ms = 0;
+}
+
+pub(crate) fn remember_recent_paste(
+    app_handle: &tauri::AppHandle,
+    content: &str,
+    content_type: &str,
+    html_content: Option<&str>,
+) {
+    let fingerprint = crate::services::clipboard::build_clipboard_text_fingerprint(
+        content_type,
+        content,
+        html_content,
+    );
+    let queue_state = app_handle.state::<PasteQueue>();
+    let mut queue = queue_state.inner().0.lock().unwrap();
+    queue.last_action_was_paste = true;
+    queue.last_pasted_content = Some(content.to_string());
+    queue.last_pasted_fingerprint = if fingerprint.is_empty() {
+        None
+    } else {
+        Some(fingerprint)
+    };
+    queue.last_paste_timestamp_ms = now_ms();
 }
 
 fn generate_cf_html(html: &str) -> String {

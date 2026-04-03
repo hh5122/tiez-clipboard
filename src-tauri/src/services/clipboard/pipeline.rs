@@ -269,17 +269,37 @@ impl PipelineStage for ValidationStage {
     fn process(&self, ctx: &mut PipelineContext) {
         let settings = ctx.app_handle.state::<SettingsState>();
 
-        // Sequential Echo Check
-        if settings.sequential_mode.load(Ordering::Relaxed) {
+        // Recent paste echo check
+        {
             let entry = ctx.entry.as_ref().unwrap();
             let queue_state = ctx.app_handle.state::<PasteQueue>();
             let queue = queue_state.0.lock().unwrap();
-            if queue.last_action_was_paste
-                && queue.last_pasted_content.as_deref() == Some(&entry.content)
-            {
-                println!("Ignoring echo paste from queue");
-                ctx.should_stop = true;
-                return;
+            if queue.last_action_was_paste {
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                if now_ms.saturating_sub(queue.last_paste_timestamp_ms) >= 10_000 {
+                    drop(queue);
+                    crate::services::clipboard_ops::clear_recent_paste_marker(&ctx.app_handle);
+                } else {
+                    let entry_fingerprint = build_clipboard_text_fingerprint(
+                        &entry.content_type,
+                        &entry.content,
+                        entry.html_content.as_deref(),
+                    );
+                    let exact_match = queue.last_pasted_content.as_deref() == Some(&entry.content);
+                    let fingerprint_match = !entry_fingerprint.is_empty()
+                        && queue.last_pasted_fingerprint.as_deref()
+                            == Some(entry_fingerprint.as_str());
+                    if exact_match || fingerprint_match {
+                        println!("Ignoring echo paste from recent paste marker");
+                        drop(queue);
+                        crate::services::clipboard_ops::clear_recent_paste_marker(&ctx.app_handle);
+                        ctx.should_stop = true;
+                        return;
+                    }
+                }
             }
         }
 
@@ -302,6 +322,14 @@ impl PipelineStage for ValidationStage {
             // Try precise match and normalized match
             let normalized_content = content.trim().replace("\r\n", "\n");
             let normalized_html = |html: &str| html.trim().replace("\r\n", "\n");
+            let recent_self_copy_window = {
+                let last_app_time = crate::LAST_APP_SET_TIMESTAMP.load(Ordering::Relaxed);
+                let now_secs = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                last_app_time != 0 && now_secs.saturating_sub(last_app_time) < 10
+            };
             let htmls_equivalent = |a: Option<&str>, b: Option<&str>| -> bool {
                 match (a, b) {
                     (None, None) => true,
@@ -310,14 +338,18 @@ impl PipelineStage for ValidationStage {
                 }
             };
             let rich_text_html_matches = |id: i64| -> bool {
-                if let Ok(Some((_content, c_type, h_content))) = db_state
+                if let Ok(Some((stored_content, c_type, h_content))) = db_state
                     .repo
                     .get_entry_content_with_html_with_conn(&conn, id)
                 {
                     if c_type != "rich_text" {
                         return false;
                     }
-                    return htmls_equivalent(html_content.as_deref(), h_content.as_deref());
+                    if htmls_equivalent(html_content.as_deref(), h_content.as_deref()) {
+                        return true;
+                    }
+                    return recent_self_copy_window
+                        && stored_content.trim().replace("\r\n", "\n") == normalized_content;
                 }
                 false
             };
@@ -384,12 +416,13 @@ impl PipelineStage for ValidationStage {
                 };
                 for item in session.iter() {
                     let item_normalized = item.content.trim().replace("\r\n", "\n");
-                    let html_match =
+                    let rich_text_match =
                         if entry.content_type == "rich_text" && item.content_type == "rich_text" {
                             htmls_equivalent(
                                 item.html_content.as_deref(),
                                 entry.html_content.as_deref(),
-                            )
+                            ) || (recent_self_copy_window
+                                && item_normalized == normalized_content)
                         } else {
                             true
                         };
@@ -399,7 +432,7 @@ impl PipelineStage for ValidationStage {
                         && calc_image_hash(&item.content) == entry_image_hash;
                     let text_match = (item.content == entry.content
                         || item_normalized == normalized_content)
-                        && html_match;
+                        && rich_text_match;
                     let match_found = image_match || text_match;
                     if match_found {
                         removed_ids.push(item.id);
@@ -542,6 +575,8 @@ impl PipelineStage for DistributionStage {
                 queue.items.clear();
                 queue.last_action_was_paste = false;
                 queue.last_pasted_content = None;
+                queue.last_pasted_fingerprint = None;
+                queue.last_paste_timestamp_ms = 0;
             }
             queue.items.push_back(entry.id);
         }
