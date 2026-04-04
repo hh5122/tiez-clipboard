@@ -44,6 +44,7 @@ const RICH_IMAGE_FALLBACK_SUFFIX = "-->";
 const TABULAR_RICH_HTML_RE = /<(table|tr|td|th|thead|tbody|tfoot|colgroup|col)\b/i;
 const SPREADSHEET_SOURCE_RE = /\b(excel|et|wps|sheet|spreadsheet|calc)\b/i;
 const SPREADSHEET_EXECUTABLE_RE = /(?:^|[\\/])(excel|et|wps|wpssheet|soffice)\.exe$/i;
+const STANDALONE_COLOR_RE = /^(#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})|(?:rgb|hsl)a?\(\s*[^)]+\s*\))$/i;
 const COMPACT_PREVIEW_DEBUG = false;
 const RICH_PREVIEW_DEBUG = import.meta.env.DEV;
 const compactPreviewLog = (...args: unknown[]) => {
@@ -106,6 +107,19 @@ const isSpreadsheetLikeSource = (...candidates: Array<string | undefined>): bool
         if (!value) return false;
         return SPREADSHEET_EXECUTABLE_RE.test(value) || SPREADSHEET_SOURCE_RE.test(value);
     });
+};
+
+const getStandaloneColorValue = (contentType: string, content: string): string | null => {
+    if (contentType !== "text" && contentType !== "code") {
+        return null;
+    }
+
+    const normalized = content.trim();
+    if (!normalized || normalized.includes("\n")) {
+        return null;
+    }
+
+    return STANDALONE_COLOR_RE.test(normalized) ? normalized : null;
 };
 
 let compactPreviewWindow: WebviewWindow | null = null;
@@ -748,6 +762,10 @@ const ClipboardItem = ({
     const quickPasteTitle = quickPasteHint
         ? `${t('quick_paste_modifier')}: ${quickPasteHint.combo}`
         : undefined;
+    const standaloneColorValue = useMemo(
+        () => getStandaloneColorValue(item.content_type, item.content),
+        [item.content, item.content_type]
+    );
 
     useEffect(() => {
         let cancelled = false;
@@ -1512,6 +1530,15 @@ const ClipboardItem = ({
                             }}
                         />
                     )
+                ) : standaloneColorValue && !isSensitiveHidden ? (
+                    <div className="color-code-preview">
+                        <span
+                            className="color-code-swatch"
+                            style={{ background: standaloneColorValue }}
+                            aria-hidden="true"
+                        />
+                        <span className="color-code-value">{standaloneColorValue}</span>
+                    </div>
                 ) : (
                     isSensitiveHidden
                         ? (
