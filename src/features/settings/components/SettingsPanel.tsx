@@ -70,6 +70,12 @@ interface SettingsPanelProps {
     setPrivacyProtectionKinds: (val: string[]) => void;
     privacyProtectionCustomRules: string;
     setPrivacyProtectionCustomRules: (val: string) => void;
+    sensitiveMaskPrefixVisible: number;
+    setSensitiveMaskPrefixVisible: (val: number) => void;
+    sensitiveMaskSuffixVisible: number;
+    setSensitiveMaskSuffixVisible: (val: number) => void;
+    sensitiveMaskEmailDomain: boolean;
+    setSensitiveMaskEmailDomain: (val: boolean) => void;
     cleanupRules: string;
     setCleanupRules: (val: string) => void;
     appCleanupPolicies: AppCleanupPolicy[];
@@ -254,7 +260,10 @@ const SettingsPanel = (props: SettingsPanelProps) => {
         collapsedGroups, settingsSubpage, setSettingsSubpage, autoStart, silentStart, persistent, persistentLimitEnabled, persistentLimit, deduplicate, captureFiles, captureRichText, richTextSnapshotPreview, deleteAfterPaste, moveToTopAfterPaste,
         sequentialMode, sequentialHotkey, isRecordingSequential,
         richPasteHotkey, isRecordingRich, searchHotkey, isRecordingSearch, quickPasteModifier,
-        privacyProtection, privacyProtectionKinds, setPrivacyProtectionKinds, privacyProtectionCustomRules, setPrivacyProtectionCustomRules, cleanupRules, setCleanupRules, appCleanupPolicies, setAppCleanupPolicies, registryWinVEnabled, setRegistryWinVEnabled, showSearchBox, setShowSearchBox, scrollTopButtonEnabled, setScrollTopButtonEnabled, arrowKeySelection, setArrowKeySelection,
+        privacyProtection, privacyProtectionKinds, setPrivacyProtectionKinds, privacyProtectionCustomRules, setPrivacyProtectionCustomRules,
+        sensitiveMaskPrefixVisible, setSensitiveMaskPrefixVisible, sensitiveMaskSuffixVisible, setSensitiveMaskSuffixVisible, sensitiveMaskEmailDomain, setSensitiveMaskEmailDomain,
+        cleanupRules, setCleanupRules, appCleanupPolicies, setAppCleanupPolicies,
+        registryWinVEnabled, setRegistryWinVEnabled, showSearchBox, setShowSearchBox, scrollTopButtonEnabled, setScrollTopButtonEnabled, arrowKeySelection, setArrowKeySelection,
         soundEnabled, setSoundEnabled, pasteSoundEnabled, setPasteSoundEnabled,
         soundVolume, setSoundVolume,
         pasteMethod, setPasteMethod,
@@ -584,6 +593,12 @@ const SettingsPanel = (props: SettingsPanelProps) => {
                 setPrivacyProtectionKinds={setPrivacyProtectionKinds}
                 privacyProtectionCustomRules={privacyProtectionCustomRules}
                 setPrivacyProtectionCustomRules={setPrivacyProtectionCustomRules}
+                sensitiveMaskPrefixVisible={sensitiveMaskPrefixVisible}
+                setSensitiveMaskPrefixVisible={setSensitiveMaskPrefixVisible}
+                sensitiveMaskSuffixVisible={sensitiveMaskSuffixVisible}
+                setSensitiveMaskSuffixVisible={setSensitiveMaskSuffixVisible}
+                sensitiveMaskEmailDomain={sensitiveMaskEmailDomain}
+                setSensitiveMaskEmailDomain={setSensitiveMaskEmailDomain}
                 privacyKindsOpen={privacyKindsOpen}
                 setPrivacyKindsOpen={setPrivacyKindsOpen}
                 privacyRulesOpen={privacyRulesOpen}
