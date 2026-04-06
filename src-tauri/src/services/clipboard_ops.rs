@@ -7,8 +7,8 @@ use crate::infrastructure::repository::settings_repo::SettingsRepository;
 use crate::services::clipboard::{
     attach_rich_image_fallback, attach_rich_named_formats,
     capture_preserved_named_formats_from_clipboard, clipboard_image_fallback_data_url,
-    extract_animated_image_data_url_from_html, parse_cf_html, split_rich_html_and_image_fallback,
-    split_rich_html_and_named_formats,
+    extract_animated_image_data_url_from_html, extract_first_image_data_url_from_html,
+    parse_cf_html, split_rich_html_and_image_fallback, split_rich_html_and_named_formats,
 };
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
@@ -601,27 +601,25 @@ async fn copy_content_to_system_clipboard(
                     };
                     let cf_html = generate_cf_html(html_for_paste);
 
-                    if let Some(payload) = fallback_image_data_url {
-                        if let Some(bytes) = resolve_rich_image_fallback_bytes(&payload) {
-                            let (primary_hash, secondary_hash, visual_hash) =
-                                copy_image_bytes_to_clipboard(bytes, current_time)?;
-                            crate::LAST_APP_SET_HASH.store(primary_hash, Ordering::SeqCst);
-                            crate::LAST_APP_SET_HASH_ALT.store(secondary_hash, Ordering::SeqCst);
-                            crate::LAST_APP_SET_IMAGE_VISUAL_HASH
-                                .store(visual_hash, Ordering::SeqCst);
-                            unsafe {
-                                crate::infrastructure::windows_api::win_clipboard::append_clipboard_text_and_html(content, &cf_html)
-                                        .map_err(AppError::from)?;
-                                crate::infrastructure::windows_api::win_clipboard::append_named_clipboard_formats(&preserved_named_formats)
-                                        .map_err(AppError::from)?;
-                            }
-                        } else {
-                            unsafe {
-                                crate::infrastructure::windows_api::win_clipboard::set_clipboard_text_and_html(content, &cf_html)
+                    let rich_image_bytes = fallback_image_data_url
+                        .as_deref()
+                        .and_then(resolve_rich_image_fallback_bytes)
+                        .or_else(|| {
+                            extract_first_image_data_url_from_html(html_for_paste)
+                                .and_then(|data_url| resolve_rich_image_fallback_bytes(&data_url))
+                        });
+
+                    if let Some(bytes) = rich_image_bytes {
+                        let (primary_hash, secondary_hash, visual_hash) =
+                            copy_image_bytes_to_clipboard(bytes, current_time)?;
+                        crate::LAST_APP_SET_HASH.store(primary_hash, Ordering::SeqCst);
+                        crate::LAST_APP_SET_HASH_ALT.store(secondary_hash, Ordering::SeqCst);
+                        crate::LAST_APP_SET_IMAGE_VISUAL_HASH.store(visual_hash, Ordering::SeqCst);
+                        unsafe {
+                            crate::infrastructure::windows_api::win_clipboard::append_clipboard_text_and_html(content, &cf_html)
                                     .map_err(AppError::from)?;
-                                crate::infrastructure::windows_api::win_clipboard::append_named_clipboard_formats(&preserved_named_formats)
+                            crate::infrastructure::windows_api::win_clipboard::append_named_clipboard_formats(&preserved_named_formats)
                                     .map_err(AppError::from)?;
-                            }
                         }
                     } else {
                         unsafe {

@@ -240,6 +240,33 @@ fn gif_data_url_from_bytes(bytes: &[u8]) -> Option<String> {
     Some(format!("data:{};base64,{}", image_mime_by_ext(ext), b64))
 }
 
+fn image_data_url_from_bytes(bytes: &[u8]) -> Option<String> {
+    let ext = image_ext_from_bytes(bytes).or_else(|| {
+        if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+            Some("gif")
+        } else {
+            None
+        }
+    })?;
+
+    let b64 = general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:{};base64,{}", image_mime_by_ext(ext), b64))
+}
+
+fn resolve_image_src_to_data_url(src: &str) -> Option<String> {
+    let value = src.trim();
+    if value.starts_with("data:image/") {
+        return Some(value.to_string());
+    }
+
+    if let Some(path) = resolve_local_image_src_path(value) {
+        let bytes = std::fs::read(&path).ok()?;
+        return image_data_url_from_bytes(&bytes);
+    }
+
+    None
+}
+
 fn resolve_animated_image_src_to_data_url(src: &str) -> Option<String> {
     let value = src.trim();
     if value.starts_with("data:image/gif") {
@@ -290,6 +317,39 @@ pub fn extract_animated_image_data_url_from_html(html: &str) -> Option<String> {
                 continue;
             };
             if let Some(data_url) = resolve_animated_image_src_to_data_url(&candidate) {
+                return Some(data_url);
+            }
+        }
+    }
+
+    None
+}
+
+pub fn extract_first_image_data_url_from_html(html: &str) -> Option<String> {
+    if html.trim().is_empty() {
+        return None;
+    }
+
+    static IMG_TAG_RE: OnceLock<Regex> = OnceLock::new();
+    static IMG_ATTR_RE: OnceLock<Regex> = OnceLock::new();
+
+    let img_tag_re = IMG_TAG_RE.get_or_init(|| Regex::new(r"(?is)<img\b[^>]*>").unwrap());
+    let img_attr_re = IMG_ATTR_RE.get_or_init(|| {
+        Regex::new(
+            r#"(?is)(src|data-src|data-original|data-actualsrc|srcset)\s*=\s*["']([^"']+)["']"#,
+        )
+        .unwrap()
+    });
+
+    for tag in img_tag_re.find_iter(html) {
+        for caps in img_attr_re.captures_iter(tag.as_str()) {
+            let Some(raw_src) = caps.get(2).map(|m| m.as_str()) else {
+                continue;
+            };
+            let Some(candidate) = normalize_html_image_src_candidate(raw_src) else {
+                continue;
+            };
+            if let Some(data_url) = resolve_image_src_to_data_url(&candidate) {
                 return Some(data_url);
             }
         }
@@ -1161,11 +1221,47 @@ mod tests {
         app_cleanup_policy_matches, apply_cleanup_rules, attach_rich_image_fallback,
         attach_rich_named_formats, build_entry_preview, collapse_preview_whitespace,
         derive_rich_text_content, extract_animated_image_data_url_from_html,
-        extract_animated_image_data_url_from_text, infer_rich_html_from_plain_text,
-        normalize_clipboard_plain_text, parse_app_cleanup_policies, parse_cf_html,
-        parse_cleanup_rules, split_rich_html_and_image_fallback, split_rich_html_and_named_formats,
+        extract_animated_image_data_url_from_text, extract_first_image_data_url_from_html,
+        infer_rich_html_from_plain_text, normalize_clipboard_plain_text,
+        parse_app_cleanup_policies, parse_cf_html, parse_cleanup_rules,
+        split_rich_html_and_image_fallback, split_rich_html_and_named_formats,
         truncate_html_for_preview, AppCleanupPolicy, HTML_TRUNCATION_SUFFIX,
     };
+    use base64::Engine;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn create_test_png_file(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("tiez_clip_utils_{}_{}", std::process::id(), unique));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg==")
+            .unwrap();
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn cleanup_test_path(path: &Path) {
+        if let Some(dir) = path.parent() {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    fn file_url_for(path: &Path) -> String {
+        let raw = path.to_string_lossy().replace('\\', "/");
+        if raw.starts_with('/') {
+            format!("file://{}", raw)
+        } else {
+            format!("file:///{}", raw)
+        }
+    }
 
     #[test]
     fn rich_text_preview_prefers_readable_html_text() {
@@ -1386,6 +1482,34 @@ mod tests {
         let extracted = extract_animated_image_data_url_from_html(html);
 
         assert!(extracted.is_none());
+    }
+
+    #[test]
+    fn extract_first_image_data_url_from_html_accepts_static_png_data_url() {
+        let png_data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA";
+        let html = format!(r#"<div><img src="{png_data_url}" alt="png" /></div>"#);
+
+        let extracted = extract_first_image_data_url_from_html(&html);
+
+        assert_eq!(extracted.as_deref(), Some(png_data_url));
+    }
+
+    #[test]
+    fn extract_first_image_data_url_from_html_reads_local_file_url() {
+        let path = create_test_png_file("rich_local.png");
+        let html = format!(
+            r#"<div><img src="{}?v=1#preview" /></div>"#,
+            file_url_for(&path)
+        );
+
+        let extracted = extract_first_image_data_url_from_html(&html);
+
+        assert!(extracted
+            .as_deref()
+            .map(|value| value.starts_with("data:image/png;base64,"))
+            .unwrap_or(false));
+
+        cleanup_test_path(&path);
     }
 
     #[test]

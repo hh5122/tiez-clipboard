@@ -26,7 +26,9 @@ pub async fn open_content(
         if id > 0 {
             // Fetch from Database
             if content_type == "rich_text" {
-                if let Ok(Some((full_content, _, html))) = state.repo.get_entry_content_with_html(id) {
+                if let Ok(Some((full_content, _, html))) =
+                    state.repo.get_entry_content_with_html(id)
+                {
                     content = full_content;
                     html_content = html;
                 }
