@@ -162,7 +162,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQwMjAxQ0ZFRTUwNDk5QjEKUldTeG1RVGwvaHdnUUthT2dXbHpOWG8xdm1ObStjaHVJMkg5aitZMDgvUnI4L2dLQUFwQUJtQjAK",
       "endpoints": [
-        "https://tiez.name666.top/api/checkUpdate?version={{current_version}}"
+        "[[TIEZ_UPDATE_ENDPOINT]]"
       ]
     }
   }

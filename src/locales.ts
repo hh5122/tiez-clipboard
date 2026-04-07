@@ -289,8 +289,11 @@ export const translations = {
         download_failed: "下载失败",
         download_failed_with_error: "下载失败: {e}",
         new_version_found: "发现新版本",
+        update_available: "发现新版本",
         no_release_notes: "暂无更新说明",
         update_now: "立即更新",
+        later: "稍后再说",
+        install_now: "立即安装",
 
         // Empty State
         no_records: "未找到相关记录",
@@ -773,8 +776,11 @@ export const translations = {
         download_failed: "Download failed",
         download_failed_with_error: "Download failed: {e}",
         new_version_found: "New Version Found",
+        update_available: "Update Available",
         no_release_notes: "No release notes",
         update_now: "Update Now",
+        later: "Later",
+        install_now: "Install Now",
 
         // Empty State
         no_records: "No records found",
@@ -1237,8 +1243,11 @@ export const translations = {
         download_failed: "下載失敗",
         download_failed_with_error: "下載失敗: {e}",
         new_version_found: "發現新版本",
+        update_available: "發現新版本",
         no_release_notes: "暫無更新說明",
         update_now: "立即更新",
+        later: "稍後再說",
+        install_now: "立即安裝",
 
         // Empty State
         no_records: "未找到相關紀錄",
