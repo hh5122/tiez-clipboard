@@ -32,10 +32,9 @@ const FileTransferChatView = ({
     localIp,
     actualPort
 }: FileTransferChatViewProps) => {
-    const resolveComposerMetrics = (height?: number) => {
-        const baseHeight = height ?? (typeof window !== "undefined" ? window.innerHeight : 0);
-        const controlHeight = Math.max(46, Math.min(84, Math.round(baseHeight * 0.1)));
-        const footerPaddingY = Math.max(8, Math.min(20, Math.round(controlHeight * 0.18)));
+    const resolveComposerMetrics = () => {
+        const controlHeight = 32;
+        const footerPaddingY = 4;
         return { controlHeight, footerPaddingY };
     };
 
@@ -388,7 +387,7 @@ const FileTransferChatView = ({
         }
 
         const updateMetrics = () => {
-            setComposerMetrics(resolveComposerMetrics(element.clientHeight));
+            setComposerMetrics(resolveComposerMetrics());
         };
 
         updateMetrics();
